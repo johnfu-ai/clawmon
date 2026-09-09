@@ -17,13 +17,8 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      # the frontend is static files; only the tauri CLI is needed
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Install tauri CLI
-        run: npm install -g @tauri-apps/cli@^2
+        run: cargo install tauri-cli --version "^2"
 
       - name: Build
         run: cargo tauri build
