@@ -26,7 +26,8 @@ jobs:
       - name: Attach artifacts to release
         uses: softprops/action-gh-release@v2
         with:
+          # cargo workspace → target dir sits at the repo root
           files: |
-            src-tauri/target/release/clawmon.exe
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+            target/release/clawmon.exe
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
