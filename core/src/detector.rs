@@ -28,6 +28,10 @@ pub struct RawSession {
     pub last_ts: String,
     pub idle_sec: Option<i64>,
     pub preview: String,
+    /// the last transcript entry is an assistant message with a tool_use
+    /// block — a tool (e.g. a long Bash command) is still executing
+    #[serde(default)]
+    pub tool_running: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,7 +66,8 @@ mod tests {
                 "last_type": "assistant",
                 "last_ts": "2026-09-08T07:30:09.435Z",
                 "idle_sec": 5,
-                "preview": "hello"
+                "preview": "hello",
+                "tool_running": false
             }]
         }"#;
         let st: RawStatus = serde_json::from_str(raw).unwrap();
@@ -77,7 +82,8 @@ mod tests {
             "now": "x", "now_epoch": 1.0,
             "sessions": [{"pid": 1, "cwd": "/a", "tty": "", "tmux": null,
                 "transcript": null, "session_id": "", "last_type": "",
-                "last_ts": "", "idle_sec": null, "preview": ""}]
+                "last_ts": "", "idle_sec": null, "preview": "",
+                "tool_running": false}]
         }"#;
         let st: RawStatus = serde_json::from_str(raw).unwrap();
         assert!(st.sessions[0].tmux.is_none());

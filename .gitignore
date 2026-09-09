@@ -2,3 +2,4 @@ target/
 .tools/
 *.log
 /src-tauri/gen/schemas
+__pycache__/

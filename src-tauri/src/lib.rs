@@ -1,7 +1,11 @@
 use clawmon_core::{detect, engine::SessionView, settings::Settings, wsl::run_wsl, Engine};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, State, WindowEvent,
+};
 
 struct AppState {
     engine: Mutex<Engine>,
@@ -23,10 +27,31 @@ fn settings_path(app: &tauri::AppHandle) -> PathBuf {
         .join("settings.json")
 }
 
+/// Update the tray tooltip with the current light counts (red first).
+fn update_tray_tooltip(app: &tauri::AppHandle, sessions: &[SessionView]) {
+    let counts = sessions.iter().fold((0, 0, 0), |mut c, s| {
+        match s.state {
+            clawmon_core::engine::SessionState::Red => c.0 += 1,
+            clawmon_core::engine::SessionState::Yellow => c.1 += 1,
+            clawmon_core::engine::SessionState::Green => c.2 += 1,
+        }
+        c
+    });
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(&format!(
+            "clawmon — 🔴{} 🟡{} 🟢{}",
+            counts.0, counts.1, counts.2
+        )));
+    }
+}
+
 /// One poll: detect sessions inside WSL, update the state machine and fire
 /// any auto-continue that is due. The frontend calls this on a timer.
 #[tauri::command]
-async fn get_status(state: State<'_, AppState>) -> Result<StatusResponse, String> {
+async fn get_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StatusResponse, String> {
     let settings = {
         let engine = state.engine.lock().map_err(|e| e.to_string())?;
         engine.settings.clone()
@@ -66,6 +91,7 @@ async fn get_status(state: State<'_, AppState>) -> Result<StatusResponse, String
 
     let engine = state.engine.lock().map_err(|e| e.to_string())?;
     let sessions = engine.last_views();
+    update_tray_tooltip(&app, &sessions);
     Ok(StatusResponse {
         sessions,
         warning: None,
@@ -118,6 +144,14 @@ async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<
     settings.save(&state.settings_path)
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -128,7 +162,48 @@ pub fn run() {
                 engine: Mutex::new(Engine::new(settings)),
                 settings_path: path,
             });
+
+            // system tray: keeps the monitor alive with the window closed
+            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("main")
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("clawmon")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let to_tray = window
+                    .app_handle()
+                    .state::<AppState>()
+                    .engine
+                    .lock()
+                    .map(|e| e.settings.close_to_tray)
+                    .unwrap_or(true);
+                if to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_status,

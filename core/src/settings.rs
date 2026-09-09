@@ -25,6 +25,8 @@ pub struct Settings {
     pub retry_interval_secs: u64,
     /// WSL distro name; empty = default distro.
     pub wsl_distro: String,
+    /// Hide to the system tray instead of exiting when the window is closed.
+    pub close_to_tray: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             max_sends: 3,
             retry_interval_secs: 600,
             wsl_distro: String::new(),
+            close_to_tray: true,
         }
     }
 }

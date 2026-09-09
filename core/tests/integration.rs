@@ -70,12 +70,8 @@ impl Drop for Fixture {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &self.tmux])
             .status();
-        let _ = std::fs::remove_dir_all(
-            self.home
-                .join(".claude")
-                .join("projects")
-                .join(&self.slug),
-        );
+        let _ =
+            std::fs::remove_dir_all(self.home.join(".claude").join("projects").join(&self.slug));
     }
 }
 
@@ -113,7 +109,14 @@ fn detects_blocked_session_and_auto_continues() {
     let (_, due) = e.update(snap);
     assert!(!due.is_empty(), "auto-continue must fire with wait_secs=0");
     for pid in due {
-        let pane = e.get_session(pid).unwrap().tmux.as_ref().unwrap().pane.clone();
+        let pane = e
+            .get_session(pid)
+            .unwrap()
+            .tmux
+            .as_ref()
+            .unwrap()
+            .pane
+            .clone();
         let keys: Vec<&str> = st.resume_keys.split_whitespace().collect();
         let mut args: Vec<&str> = vec!["tmux", "send-keys", "-t", &pane];
         args.extend(keys.iter().copied());
@@ -131,4 +134,153 @@ fn detects_blocked_session_and_auto_continues() {
         text.contains("CLAWMON-FIRED"),
         "keys did not reach the pane: {text}"
     );
+}
+
+/// Two claude processes in the same directory must map to two distinct
+/// transcript files (per-session mapping), and only the stale one goes red.
+#[test]
+#[ignore = "requires live WSL/Linux + tmux"]
+fn concurrent_sessions_get_distinct_transcripts() {
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let cwd = std::env::temp_dir().join("clawmon-it2");
+    let slug = "-tmp-clawmon-it2";
+    let proj = home.join(".claude").join("projects").join(slug);
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    // clean slate: any files left by an earlier run break the pairing
+    for f in std::fs::read_dir(&proj).unwrap().flatten() {
+        let _ = std::fs::remove_file(f.path());
+    }
+
+    let tmux = "clawmonit2";
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", tmux])
+        .status();
+
+    // file B: session started "now" — its first entry matches proc 1 start
+    let t0 = iso_now_plus(0);
+    std::fs::write(
+        proj.join("00000000-0000-0000-0000-00000000000b.jsonl"),
+        format!(
+            concat!(
+                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-b","cwd":"/tmp/clawmon-it2","message":{{"role":"user","content":"hi"}}}}"#, "\n",
+                r#"{{"type":"assistant","timestamp":"{}","sessionId":"sess-b","cwd":"/tmp/clawmon-it2","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#, "\n",
+            ),
+            t0, t0,
+        ),
+    )
+    .unwrap();
+    Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            tmux,
+            &format!("bash -c 'cd {} && exec -a claude sleep 90'", cwd.display()),
+        ])
+        .status()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    // file A: first entry matches proc 2 start (~now+1.2s) but its last
+    // entry is an old user message → this session is blocked
+    let t1 = iso_now_plus(0);
+    let old = iso_now_plus(-400);
+    std::fs::write(
+        proj.join("00000000-0000-0000-0000-00000000000a.jsonl"),
+        format!(
+            concat!(
+                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-a","cwd":"/tmp/clawmon-it2","message":{{"role":"user","content":"start"}}}}"#, "\n",
+                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-a","cwd":"/tmp/clawmon-it2","message":{{"role":"user","content":"continue"}}}}"#, "\n",
+            ),
+            t1, old,
+        ),
+    )
+    .unwrap();
+    Command::new("tmux")
+        .args([
+            "new-window",
+            "-d",
+            "-t",
+            tmux,
+            &format!("bash -c 'cd {} && exec -a claude sleep 90'", cwd.display()),
+        ])
+        .status()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let st = Settings::default();
+    let snap = detect(&st).expect("detect");
+    let ours: Vec<_> = snap
+        .sessions
+        .iter()
+        .filter(|s| s.cwd == "/tmp/clawmon-it2")
+        .collect();
+    assert_eq!(ours.len(), 2, "both fake claude processes must be found");
+
+    let mut e = Engine::new(st);
+    let (views, _) = e.update(snap);
+    let views: Vec<_> = views
+        .into_iter()
+        .filter(|v| v.cwd == "/tmp/clawmon-it2")
+        .collect();
+    assert_eq!(views.len(), 2);
+
+    // distinct transcript mapping
+    let ids: std::collections::HashSet<&str> =
+        views.iter().map(|v| v.session_id.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "sessions must not share a transcript: {ids:?}"
+    );
+
+    // exactly the stale one is red
+    let red: Vec<_> = views
+        .iter()
+        .filter(|v| v.state == SessionState::Red)
+        .collect();
+    assert_eq!(red.len(), 1, "exactly one session must be red");
+    assert_eq!(red[0].session_id, "sess-a");
+    assert_eq!(red[0].label, "疑似 API 超时");
+
+    let green: Vec<_> = views
+        .iter()
+        .filter(|v| v.state != SessionState::Red)
+        .collect();
+    assert_eq!(green[0].session_id, "sess-b");
+
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", tmux])
+        .status();
+    let _ = std::fs::remove_dir_all(&proj);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+/// Minimal RFC3339 timestamp helper (avoids a chrono dependency in tests).
+fn iso_now_plus(secs: i64) -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + secs;
+    // days since epoch → civil date (Howard Hinnant's algorithm)
+    let days = t.div_euclid(86400);
+    let secs_of_day = t.rem_euclid(86400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs_of_day / 3600,
+        secs_of_day % 3600 / 60,
+        secs_of_day % 60
+    )
 }

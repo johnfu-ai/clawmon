@@ -150,6 +150,7 @@ function loadSettingsForm(s) {
   f.idleGreenSecs.value = s.idleGreenSecs;
   f.blockedAfterSecs.value = s.blockedAfterSecs;
   f.autoContinue.checked = s.autoContinue;
+  f.closeToTray.checked = s.closeToTray;
   f.waitHours.value = (s.waitSecs / 3600).toFixed(1);
   f.resumeKeys.value = s.resumeKeys;
   f.maxSends.value = s.maxSends;
@@ -182,6 +183,7 @@ async function saveSettings(ev) {
     idleGreenSecs: num(f.idleGreenSecs.value, 120),
     blockedAfterSecs: num(f.blockedAfterSecs.value, 300),
     autoContinue: f.autoContinue.checked,
+    closeToTray: f.closeToTray.checked,
     waitSecs: Math.round(num(f.waitHours.value, 5) * 3600),
     resumeKeys: f.resumeKeys.value.trim() || "Enter",
     maxSends: num(f.maxSends.value, 3),

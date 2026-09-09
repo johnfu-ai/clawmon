@@ -69,6 +69,10 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, &'static str) {
     match s.last_type.as_str() {
         // transcript activity within the green window → actively working
         _ if idle < st.idle_green_secs => (SessionState::Green, "运行中"),
+        // a tool_use block is the last transcript activity: the tool result
+        // is only appended when the tool *finishes*, so claude is
+        // legitimately busy (e.g. a long Bash command) — never blocked
+        _ if s.tool_running => (SessionState::Yellow, "工具运行中"),
         // claude finished its turn and is waiting for the human
         "assistant" => (SessionState::Yellow, "等待输入"),
         // waiting for claude to respond — if it stays this way too long the
@@ -145,10 +149,7 @@ impl Engine {
                     t.last_send_at.unwrap_or(now) + self.settings.retry_interval_secs as i64
                 };
                 remaining = Some((next_at - now).max(0));
-                if next_at <= now
-                    && controllable
-                    && t.sends < self.settings.max_sends
-                {
+                if next_at <= now && controllable && t.sends < self.settings.max_sends {
                     due.push(s.pid);
                     remaining = Some(0);
                 }
@@ -159,7 +160,10 @@ impl Engine {
                 project: basename(&s.cwd),
                 cwd: s.cwd.clone(),
                 tty: s.tty.clone(),
-                tmux_label: s.tmux.as_ref().map(|t| format!("{}:{}", t.session, t.window)),
+                tmux_label: s
+                    .tmux
+                    .as_ref()
+                    .map(|t| format!("{}:{}", t.session, t.window)),
                 session_id: s.session_id.clone(),
                 state,
                 label: label.to_string(),
@@ -193,7 +197,6 @@ impl Engine {
         t.sends += 1;
         t.last_send_at = Some(now);
     }
-
 }
 
 #[cfg(test)]
@@ -216,6 +219,7 @@ mod tests {
             last_ts: String::new(),
             idle_sec: Some(idle),
             preview: "做点什么".into(),
+            tool_running: false,
         }
     }
 
@@ -326,6 +330,23 @@ mod tests {
         let (v, due) = e.update(snap(t0, vec![s]));
         assert!(!v[0].controllable);
         assert!(due.is_empty()); // never auto-sends to an uncontrolled session
+    }
+
+    #[test]
+    fn tool_running_never_red() {
+        // a long-running tool (assistant entry whose last block is tool_use)
+        // must not be classified as blocked, no matter how long it runs
+        let mut st = Settings::default();
+        st.wait_secs = 0;
+        let mut e = Engine::new(st);
+        let mut s = session(1, "assistant", 7200); // 2h "idle" while tool runs
+        s.tool_running = true;
+        let t0 = 10_000;
+        let (v, due) = e.update(snap(t0, vec![s]));
+        assert_eq!(v[0].state, SessionState::Yellow);
+        assert_eq!(v[0].label, "工具运行中");
+        assert!(due.is_empty());
+        assert!(v[0].blocked_since.is_none());
     }
 
     #[test]
