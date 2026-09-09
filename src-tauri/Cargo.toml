@@ -1,0 +1,18 @@
+[package]
+name = "clawmon"
+version.workspace = true
+edition.workspace = true
+description = "Claude Code WSL 状态监控小程序"
+
+[lib]
+name = "clawmon_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+clawmon-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

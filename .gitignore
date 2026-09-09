@@ -1,0 +1,4 @@
+target/
+.tools/
+*.log
+/src-tauri/gen/schemas

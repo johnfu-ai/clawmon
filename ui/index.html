@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude WSL 监控</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">◆</span>
+      <span>Claude WSL 监控</span>
+      <span id="summary" class="summary"></span>
+    </div>
+    <button id="btn-settings" title="设置" aria-label="设置">⚙</button>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <main id="list">
+    <!-- session rows rendered by app.js -->
+  </main>
+
+  <div id="empty" class="empty hidden">
+    <div class="empty-icon">⌘</div>
+    <p>未发现运行中的 Claude Code 会话</p>
+    <p class="hint">在 WSL 终端里启动 claude 即可自动识别</p>
+  </div>
+
+  <section id="settings" class="settings hidden">
+    <h2>设置</h2>
+    <form id="settings-form">
+      <label>轮询间隔（秒）
+        <input type="number" name="pollIntervalSecs" min="2" max="120" />
+      </label>
+      <label>活跃判定（秒）——多长时间无输出算“空闲”
+        <input type="number" name="idleGreenSecs" min="10" max="3600" />
+      </label>
+      <label>超时判定（秒）——等待响应超过该时长视为 API 超时
+        <input type="number" name="blockedAfterSecs" min="60" max="86400" />
+      </label>
+      <label>自动继续
+        <input type="checkbox" name="autoContinue" />
+      </label>
+      <label>等待时长（小时）——红灯后多久自动继续
+        <input type="number" name="waitHours" min="0" max="24" step="0.5" />
+      </label>
+      <label>继续按键（tmux 键名，空格分隔）
+        <input type="text" name="resumeKeys" placeholder="Enter" />
+      </label>
+      <label>最大自动尝试次数
+        <input type="number" name="maxSends" min="1" max="10" />
+      </label>
+      <label>重试间隔（分钟）
+        <input type="number" name="retryIntervalMin" min="1" max="120" />
+      </label>
+      <label>WSL 发行版（留空 = 默认）
+        <input type="text" name="wslDistro" placeholder="Ubuntu" />
+      </label>
+      <div class="settings-actions">
+        <button type="submit" class="primary">保存</button>
+        <button type="button" id="btn-cancel-settings">关闭</button>
+      </div>
+    </form>
+    <p class="hint">提示：只有运行在 tmux 里的 Claude Code 才能被自动控制，
+      建议用 <code>tmux new -s work</code> 后在里面启动 claude。</p>
+  </section>
+
+  <footer>
+    <span id="foot-status">连接 WSL…</span>
+    <span id="foot-clock"></span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
