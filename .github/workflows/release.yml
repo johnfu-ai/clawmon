@@ -1,0 +1,37 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      # the frontend is static files; only the tauri CLI is needed
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build
+        run: cargo tauri build
+
+      - name: Attach artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/clawmon.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
