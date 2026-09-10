@@ -17,6 +17,20 @@
         "minHeight": 420,
         "resizable": true,
         "center": true
+      },
+      {
+        "label": "pet",
+        "title": "clawmon pet",
+        "url": "pet.html",
+        "width": 110,
+        "height": 110,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
       }
     ],
     "security": {

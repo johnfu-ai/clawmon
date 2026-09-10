@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>clawmon pet</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+    }
+    body { user-select: none; }
+
+    #pet {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    #pet:active { cursor: grabbing; }
+
+    #cat {
+      width: 92px;
+      height: 92px;
+      animation: bob 3.2s ease-in-out infinite;
+    }
+    @keyframes bob {
+      0%, 100% { transform: translateY(0); }
+      50%      { transform: translateY(-2.5px); }
+    }
+
+    #tail {
+      transform-box: fill-box;
+      transform-origin: 10% 90%;
+      animation: wag 1.8s ease-in-out infinite;
+    }
+    @keyframes wag {
+      0%, 100% { transform: rotate(-4deg); }
+      50%      { transform: rotate(10deg); }
+    }
+
+    /* happy eyes blink; other eye sets are swapped per state below */
+    .eyes { display: none; }
+    #pet[data-state="green"]  .eyes.happy,
+    #pet[data-state="yellow"] .eyes.asleep,
+    #pet[data-state="red"]    .eyes.alarmed,
+    #pet[data-state="off"]    .eyes.asleep { display: block; }
+
+    #pet[data-state="green"] .eyes .eye {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: blink 4.2s infinite;
+    }
+    @keyframes blink {
+      0%, 93%, 100% { transform: scaleY(1); }
+      96%           { transform: scaleY(0.08); }
+    }
+
+    .mouth { display: none; }
+    #pet[data-state="green"]  .mouth.smile,
+    #pet[data-state="yellow"] .mouth.smile,
+    #pet[data-state="red"]    .mouth.gasp { display: block; }
+
+    .sweat { display: none; }
+    #pet[data-state="yellow"] .sweat,
+    #pet[data-state="off"]    .sweat { display: block; }
+
+    .alert { display: none; }
+    #pet[data-state="red"] .alert { display: block; }
+    #pet[data-state="red"] .alert circle { animation: pulse 0.9s ease-in-out infinite; }
+    @keyframes pulse {
+      0%, 100% { r: 5; opacity: 1; }
+      50%      { r: 6; opacity: 0.75; }
+    }
+
+    /* red = something is stuck: the cat is jittery */
+    #pet[data-state="red"] #cat { animation: bob 3.2s ease-in-out infinite, shake 0.35s linear infinite; }
+    @keyframes shake {
+      0%, 100% { translate: 0 0; }
+      25%      { translate: -1.2px 0.6px; }
+      75%      { translate: 1.2px -0.6px; }
+    }
+
+    /* WSL unreachable: cat goes gray and dozes off */
+    #pet[data-state="off"] #cat { filter: grayscale(1); opacity: 0.8; }
+
+    #badge {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 5px;
+      border-radius: 10px;
+      background: #ef4444;
+      color: #fff;
+      font: bold 12px/20px system-ui, sans-serif;
+      text-align: center;
+      border: 2px solid #fff;
+    }
+    #badge.yellow { background: #eab308; color: #78350f; }
+    #badge.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="pet" data-state="green">
+    <svg id="cat" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="fur" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#fbbf24"/>
+          <stop offset="1" stop-color="#f59e0b"/>
+        </linearGradient>
+      </defs>
+
+      <!-- tail -->
+      <path id="tail"
+            d="M72 80 C 92 78 96 60 88 52 C 84 48 78 52 80 58 C 84 66 78 70 70 70 Z"
+            fill="url(#fur)" stroke="#d97706" stroke-width="1"/>
+
+      <!-- body -->
+      <path d="M50 44 C 32 44 26 60 26 76 C 26 90 37 96 50 96 C 63 96 74 90 74 76 C 74 60 68 44 50 44 Z"
+            fill="url(#fur)" stroke="#d97706" stroke-width="1.5"/>
+      <ellipse cx="50" cy="76" rx="12" ry="13" fill="#fde68a"/>
+      <path d="M30 60 q4 3 0 7 M70 60 q-4 3 0 7"
+            stroke="#d97706" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+
+      <!-- front paws -->
+      <ellipse cx="41" cy="92" rx="6.5" ry="4.5" fill="#fde68a" stroke="#d97706" stroke-width="1"/>
+      <ellipse cx="59" cy="92" rx="6.5" ry="4.5" fill="#fde68a" stroke="#d97706" stroke-width="1"/>
+
+      <!-- ears -->
+      <path d="M31 30 L26 8 L46 20 Z" fill="url(#fur)" stroke="#d97706" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M69 30 L74 8 L54 20 Z" fill="url(#fur)" stroke="#d97706" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M32.5 26 L30 13.5 L41.5 20 Z" fill="#fca5a5"/>
+      <path d="M67.5 26 L70 13.5 L58.5 20 Z" fill="#fca5a5"/>
+
+      <!-- head -->
+      <circle cx="50" cy="38" r="24" fill="url(#fur)" stroke="#d97706" stroke-width="1.5"/>
+      <path d="M46 16 l1.5 7 M50 15 l0 7.5 M54 16 l-1.5 7"
+            stroke="#d97706" stroke-width="1.8" fill="none" stroke-linecap="round"/>
+
+      <!-- eyes -->
+      <g class="eyes happy">
+        <g class="eye">
+          <ellipse cx="40" cy="38" rx="3" ry="4" fill="#451a03"/>
+          <circle cx="41" cy="36.5" r="1" fill="#fff"/>
+        </g>
+        <g class="eye">
+          <ellipse cx="60" cy="38" rx="3" ry="4" fill="#451a03"/>
+          <circle cx="61" cy="36.5" r="1" fill="#fff"/>
+        </g>
+      </g>
+      <g class="eyes alarmed">
+        <ellipse cx="40" cy="38" rx="4.5" ry="5" fill="#fff" stroke="#451a03" stroke-width="1.2"/>
+        <circle cx="40.5" cy="38.5" r="2" fill="#451a03"/>
+        <ellipse cx="60" cy="38" rx="4.5" ry="5" fill="#fff" stroke="#451a03" stroke-width="1.2"/>
+        <circle cx="60.5" cy="38.5" r="2" fill="#451a03"/>
+      </g>
+      <g class="eyes asleep">
+        <path d="M36 38 q4 3 8 0" fill="none" stroke="#451a03" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M56 38 q4 3 8 0" fill="none" stroke="#451a03" stroke-width="1.8" stroke-linecap="round"/>
+      </g>
+
+      <!-- nose + mouth -->
+      <path d="M48 46 h4 l-2 2.2 Z" fill="#f472b6"/>
+      <path class="mouth smile" d="M45.5 51 q2.2 2.8 4.5 0 q2.3 2.8 4.5 0"
+            fill="none" stroke="#451a03" stroke-width="1.5" stroke-linecap="round"/>
+      <ellipse class="mouth gasp" cx="50" cy="52.5" rx="2.6" ry="3.2" fill="#9f1239"/>
+
+      <!-- blush + whiskers -->
+      <ellipse cx="34" cy="46" rx="3.5" ry="2" fill="#fca5a5" opacity="0.55"/>
+      <ellipse cx="66" cy="46" rx="3.5" ry="2" fill="#fca5a5" opacity="0.55"/>
+      <path d="M24 40 h9 M25 45 l8 -2 M76 40 h-9 M75 45 l-8 -2"
+            stroke="#d97706" stroke-width="1.2" stroke-linecap="round"/>
+
+      <!-- extras -->
+      <path class="sweat" d="M74 20 q3.5 5 0 7 q-3.5 -2 0 -7 Z" fill="#7dd3fc"/>
+      <g class="alert">
+        <circle cx="50" cy="5.5" r="5" fill="#ef4444"/>
+        <text x="50" y="8.8" text-anchor="middle" font-size="8.5" font-weight="bold" fill="#fff">!</text>
+      </g>
+    </svg>
+    <div id="badge" class="hidden"></div>
+  </div>
+  <script src="pet.js"></script>
+</body>
+</html>
