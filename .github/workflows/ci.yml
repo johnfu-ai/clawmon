@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The monitoring logic is platform independent and the detector has a live
+  # test suite that only needs a Linux box with python3 + tmux.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy -p clawmon-core --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test -p clawmon-core
+
+      # Spawns a fake `claude` process inside tmux and drives a full
+      # detect → classify → tmux send-keys round trip.
+      - name: Live integration tests
+        run: cargo test -p clawmon-core --test integration -- --ignored --test-threads=1
+
+      - name: Detection script compiles
+        run: python3 -m py_compile src-tauri/src/detect.py
+
+  # The Tauri shell only builds on Windows (WebView2); check it here so the
+  # app-facing code is not left to a release build to type-check.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy -p clawmon --all-targets -- -D warnings

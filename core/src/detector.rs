@@ -32,6 +32,15 @@ pub struct RawSession {
     /// block — a tool (e.g. a long Bash command) is still executing
     #[serde(default)]
     pub tool_running: bool,
+    /// the transcript was written at or after this process started, so it is
+    /// known to belong to it rather than being a stale file the fallback
+    /// pairing heuristics handed us. Absent payloads default to trusted.
+    #[serde(default = "trusted")]
+    pub transcript_live: bool,
+}
+
+fn trusted() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,13 +76,27 @@ mod tests {
                 "last_ts": "2026-09-08T07:30:09.435Z",
                 "idle_sec": 5,
                 "preview": "hello",
-                "tool_running": false
+                "tool_running": false,
+                "transcript_live": true
             }]
         }"#;
         let st: RawStatus = serde_json::from_str(raw).unwrap();
         assert_eq!(st.sessions.len(), 1);
         assert_eq!(st.sessions[0].tmux.as_ref().unwrap().pane, "%0");
         assert_eq!(st.sessions[0].idle_sec, Some(5));
+        assert!(st.sessions[0].transcript_live);
+    }
+
+    /// An older detector does not send `transcript_live`; treat its records as
+    /// trustworthy rather than silently dropping every session out of red.
+    #[test]
+    fn missing_transcript_live_defaults_to_trusted() {
+        let raw = r#"{"now":"x","now_epoch":1.0,"sessions":[{"pid":1,"cwd":"/a",
+            "tty":"","tmux":null,"transcript":"/t.jsonl","session_id":"",
+            "last_type":"user","last_ts":"","idle_sec":5,"preview":""}]}"#;
+        let st: RawStatus = serde_json::from_str(raw).unwrap();
+        assert!(st.sessions[0].transcript_live);
+        assert!(!st.sessions[0].tool_running);
     }
 
     #[test]

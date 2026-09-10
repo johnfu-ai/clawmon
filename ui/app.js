@@ -1,9 +1,15 @@
 /* clawmon frontend — plain JS on the Tauri global API (no bundler needed) */
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-let pollTimer = null;
-let pollInterval = 5;
+
+/* The backend polls on its own schedule and pushes a snapshot after every
+   pass — there is deliberately no timer here. A hidden window's timers are
+   throttled by WebView2, which is exactly the state (tray / pet) the monitor
+   has to keep working in. */
+let snapshot = { sessions: [], warning: null };
+let snapshotAt = Date.now();
 
 function fmtIdle(sec) {
   if (sec == null) return "—";
@@ -39,6 +45,9 @@ function toast(msg, isError = false) {
 }
 
 function render(sessions, warning) {
+  snapshot = { sessions, warning };
+  snapshotAt = Date.now();
+
   const banner = $("banner");
   if (warning) {
     banner.textContent = `⚠ ${warning}`;
@@ -46,6 +55,9 @@ function render(sessions, warning) {
   } else {
     banner.classList.add("hidden");
   }
+  $("foot-status").textContent = warning
+    ? "WSL 连接异常"
+    : `WSL 正常 · ${sessions.length} 个会话`;
 
   const list = $("list");
   const empty = $("empty");
@@ -61,23 +73,30 @@ function render(sessions, warning) {
   for (const s of sessions) counts[s.state]++;
 
   list.innerHTML = sessions.map((s) => {
+    const state = LIGHTS.includes(s.state) ? s.state : "yellow";
     const rows = [];
-    const light = `<span class="light ${s.state}"></span>`;
+    const light = `<span class="light ${state}"></span>`;
     const meta = [
       `<span class="pid">PID ${s.pid}</span>`,
-      s.tmuxLabel ? `<span class="tmux">tmux ${s.tmuxLabel}</span>`
+      s.tmuxLabel ? `<span class="tmux">tmux ${escapeHtml(s.tmuxLabel)}</span>`
                   : `<span class="tmux">无 tmux</span>`,
       `<span>空闲 ${fmtIdle(s.idleSec)}</span>`,
       s.tmuxLabel ? "" : `<span class="no-control">仅监控</span>`,
     ].filter(Boolean).join("");
 
     let countdown = "";
-    if (s.state === "red" && s.remainingSec != null) {
-      countdown = `<span class="countdown">${fmtCountdown(s.remainingSec)}</span>`;
-    } else if (s.state === "red" && s.sends > 0 && s.lastSendAt) {
-      countdown = `<span class="countdown sent">已自动继续 ${s.sends} 次</span>`;
-    } else if (s.state === "red") {
-      countdown = `<span class="countdown sent">已停用自动继续</span>`;
+    if (state === "red") {
+      if (s.controllable && s.remainingSec != null) {
+        // the ticker below keeps this one counting between polls
+        countdown = `<span class="countdown" data-countdown="${s.pid}">${
+          countdownText(s, s.remainingSec)}</span>`;
+      } else if (!s.controllable) {
+        countdown = `<span class="countdown sent">不在 tmux 中，无法自动继续</span>`;
+      } else if (s.sends > 0) {
+        countdown = `<span class="countdown sent">已自动继续 ${s.sends} 次（已达上限）</span>`;
+      } else {
+        countdown = `<span class="countdown sent">已停用自动继续</span>`;
+      }
     }
 
     const preview = s.preview ? `<div class="session-preview">“${escapeHtml(s.preview)}”</div>` : "";
@@ -90,7 +109,7 @@ function render(sessions, warning) {
         <div class="session-top">
           ${light}
           <span class="session-name" title="${escapeHtml(s.cwd)}">${escapeHtml(s.project)}</span>
-          <span class="session-state ${s.state}">${s.label}</span>
+          <span class="session-state ${state}">${escapeHtml(s.label)}</span>
         </div>
         <div class="session-meta">${meta}</div>
         ${preview}
@@ -110,10 +129,30 @@ function render(sessions, warning) {
   }
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({
+const LIGHTS = ["green", "yellow", "red"];
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
+}
+
+/* A red session shows either "…后自动继续" or, once it has been resumed,
+   "已继续 N 次 · …后重试" — both need the send count in front. */
+function countdownText(session, remainingSec) {
+  const prefix = session.sends > 0 ? `已继续 ${session.sends} 次 · ` : "";
+  return prefix + fmtCountdown(remainingSec);
+}
+
+/* The backend speaks every few seconds; tick the countdowns in between so the
+   seconds actually move. */
+function tickCountdowns() {
+  const elapsed = Math.floor((Date.now() - snapshotAt) / 1000);
+  for (const s of snapshot.sessions) {
+    if (s.state !== "red" || !s.controllable || s.remainingSec == null) continue;
+    const el = document.querySelector(`[data-countdown="${s.pid}"]`);
+    if (el) el.textContent = countdownText(s, s.remainingSec - elapsed);
+  }
 }
 
 async function onContinue(pid) {
@@ -125,21 +164,15 @@ async function onContinue(pid) {
   }
 }
 
-async function poll() {
+/** Render the backend's latest snapshot without waiting for the next poll. */
+async function refresh() {
   try {
     const res = await invoke("get_status");
     render(res.sessions, res.warning);
-    $("foot-status").textContent =
-      res.warning ? "WSL 连接异常" : `WSL 正常 · ${res.sessions.length} 个会话`;
   } catch (e) {
     $("foot-status").textContent = "查询失败";
     toast(String(e), true);
   }
-}
-
-function restartTimer() {
-  clearInterval(pollTimer);
-  pollTimer = setInterval(poll, pollInterval * 1000);
 }
 
 /* ---------- settings panel ---------- */
@@ -178,13 +211,17 @@ async function saveSettings(ev) {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : dflt;
   };
+  // unlike the others, 0 hours is a valid choice ("resume as soon as it turns
+  // red"), so it must not fall back to the default
+  const hours = Number(f.waitHours.value);
   const s = {
     pollIntervalSecs: num(f.pollIntervalSecs.value, 5),
     idleGreenSecs: num(f.idleGreenSecs.value, 120),
     blockedAfterSecs: num(f.blockedAfterSecs.value, 300),
     autoContinue: f.autoContinue.checked,
     closeToTray: f.closeToTray.checked,
-    waitSecs: Math.round(num(f.waitHours.value, 5) * 3600),
+    waitSecs: Math.round(
+      (Number.isFinite(hours) && hours >= 0 ? Math.min(hours, 24) : 5) * 3600),
     resumeKeys: f.resumeKeys.value.trim() || "Enter",
     maxSends: num(f.maxSends.value, 3),
     retryIntervalSecs: num(f.retryIntervalMin.value, 10) * 60,
@@ -192,11 +229,9 @@ async function saveSettings(ev) {
   };
   try {
     await invoke("set_settings", { settings: s });
-    pollInterval = s.pollIntervalSecs;
-    restartTimer();
     closeSettings();
     toast("设置已保存");
-    poll();
+    // the backend re-reads the poll interval on every pass, nothing to restart
   } catch (e) {
     toast(String(e), true);
   }
@@ -209,13 +244,19 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("btn-cancel-settings").addEventListener("click", closeSettings);
   $("settings-form").addEventListener("submit", saveSettings);
 
-  try {
-    const s = await invoke("get_settings");
-    pollInterval = s.pollIntervalSecs;
-  } catch { /* keep default */ }
+  // every poll the backend makes ends up here
+  listen("sessions", (event) => render(event.payload.sessions, event.payload.warning));
+  await refresh();
 
-  poll();
-  restartTimer();
+  // WebView2 stops running this page's scripts while the window is hidden
+  // (tray, or minimized to the pet), so pick up the latest snapshot when the
+  // window comes back instead of trusting whatever is still on screen.
+  window.addEventListener("focus", refresh);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) refresh();
+  });
+
+  setInterval(tickCountdowns, 1000);
   setInterval(() => {
     const d = new Date();
     $("foot-clock").textContent = d.toLocaleTimeString("zh-CN", { hour12: false });

@@ -3,8 +3,20 @@
 //! integration -- --ignored`.
 
 use clawmon_core::{detect, wsl::run_wsl, Engine, SessionState, SessionView, Settings};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Refresh a file's mtime.
+///
+/// The detector only trusts a transcript that was written at or after the
+/// process it is paired with started — that is what stops a stale session
+/// file from being reported as a stuck session. A fixture that lays the
+/// record down before spawning the process therefore has to claim it
+/// explicitly.
+fn touch(path: &Path) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now()).unwrap();
+}
 
 struct Fixture {
     home: PathBuf,
@@ -55,6 +67,7 @@ impl Fixture {
             .status()
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(500));
+        touch(&transcript);
 
         Self {
             home,
@@ -87,11 +100,13 @@ fn run(settings: &Settings) -> (Vec<SessionView>, Vec<i32>, clawmon_core::RawSta
 fn detects_blocked_session_and_auto_continues() {
     let fx = Fixture::setup();
 
-    let mut st = Settings::default();
-    st.wait_secs = 0; // fire immediately for the test
-    st.blocked_after_secs = 60;
-    st.idle_green_secs = 10;
-    st.resume_keys = "CLAWMON-FIRED".to_string();
+    let st = Settings {
+        wait_secs: 0, // fire immediately for the test
+        blocked_after_secs: 60,
+        idle_green_secs: 10,
+        resume_keys: "CLAWMON-FIRED".to_string(),
+        ..Default::default()
+    };
 
     let (views, _, _) = run(&st);
     let v = views
@@ -103,7 +118,7 @@ fn detects_blocked_session_and_auto_continues() {
     assert!(v.controllable, "tmux session should be controllable");
     assert!(v.remaining_sec.is_some());
 
-    // full pass with the engine, mirroring what the tauri command does
+    // full pass with the engine, mirroring what the poll loop does
     let snap = detect(&st).unwrap();
     let mut e = Engine::new(st.clone());
     let (_, due) = e.update(snap);
@@ -121,7 +136,7 @@ fn detects_blocked_session_and_auto_continues() {
         let mut args: Vec<&str> = vec!["tmux", "send-keys", "-t", &pane];
         args.extend(keys.iter().copied());
         run_wsl("", &args).expect("send-keys");
-        e.record_send(pid);
+        // no record_send here: update() already counted the attempt
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -208,6 +223,9 @@ fn concurrent_sessions_get_distinct_transcripts() {
         .status()
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(500));
+    // both records were laid down before their process started
+    touch(&proj.join("00000000-0000-0000-0000-00000000000a.jsonl"));
+    touch(&proj.join("00000000-0000-0000-0000-00000000000b.jsonl"));
 
     let st = Settings::default();
     let snap = detect(&st).expect("detect");

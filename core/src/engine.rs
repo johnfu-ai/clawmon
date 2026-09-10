@@ -66,24 +66,36 @@ fn basename(p: &str) -> String {
 
 fn classify(s: &RawSession, st: &Settings) -> (SessionState, &'static str) {
     let idle = s.idle_sec.unwrap_or(i64::MAX);
-    match s.last_type.as_str() {
-        // transcript activity within the green window → actively working
-        _ if idle < st.idle_green_secs => (SessionState::Green, "运行中"),
-        // a tool_use block is the last transcript activity: the tool result
-        // is only appended when the tool *finishes*, so claude is
-        // legitimately busy (e.g. a long Bash command) — never blocked
-        _ if s.tool_running => (SessionState::Yellow, "工具运行中"),
-        // claude finished its turn and is waiting for the human
-        "assistant" => (SessionState::Yellow, "等待输入"),
-        // waiting for claude to respond — if it stays this way too long the
-        // API side is likely exhausted (usage limit pause)
-        _ => {
-            if idle >= st.blocked_after_secs {
-                (SessionState::Red, "疑似 API 超时")
-            } else {
-                (SessionState::Yellow, "等待响应")
-            }
-        }
+    // transcript activity within the green window → actively working
+    if idle < st.idle_green_secs {
+        return (SessionState::Green, "运行中");
+    }
+    // Without a transcript we can vouch for, "idle for six hours" means
+    // nothing: either claude has not written anything yet, or the file
+    // belongs to a different session. Never call that blocked — the cost of a
+    // false positive is pressing Enter in an innocent terminal.
+    if s.transcript.is_none() {
+        return (SessionState::Yellow, "未找到记录");
+    }
+    if !s.transcript_live {
+        return (SessionState::Yellow, "记录未就绪");
+    }
+    // a tool_use block is the last transcript activity: the tool result is
+    // only appended when the tool *finishes*, so claude is legitimately busy
+    // (e.g. a long Bash command) — never blocked
+    if s.tool_running {
+        return (SessionState::Yellow, "工具运行中");
+    }
+    // claude finished its turn and is waiting for the human
+    if s.last_type == "assistant" {
+        return (SessionState::Yellow, "等待输入");
+    }
+    // waiting for claude to respond — if it stays this way too long the API
+    // side is likely exhausted (usage limit pause)
+    if idle >= st.blocked_after_secs {
+        (SessionState::Red, "疑似 API 超时")
+    } else {
+        (SessionState::Yellow, "等待响应")
     }
 }
 
@@ -109,9 +121,11 @@ impl Engine {
     }
 
     /// Fold a fresh snapshot into the state machine.
+    ///
     /// Returns the views for the UI plus the pids whose auto-continue fires
-    /// *now* (the caller performs the actual key sending, then calls
-    /// `record_send` for each).
+    /// *now*. A fired attempt is already counted against the episode (see
+    /// below), so the caller only has to send the keys — it must not call
+    /// `record_send` again for these pids.
     pub fn update(&mut self, snap: RawStatus) -> (Vec<SessionView>, Vec<i32>) {
         self.last_snapshot = snap.sessions.clone();
         let now = snap.now_epoch as i64;
@@ -126,32 +140,42 @@ impl Engine {
             let (state, label) = classify(s, &self.settings);
             let t = self.tracked.entry(s.pid).or_default();
 
-            match state {
-                SessionState::Red => {
-                    if t.blocked_since.is_none() {
-                        t.blocked_since = Some(now);
-                    }
+            if state == SessionState::Red {
+                if t.blocked_since.is_none() {
+                    t.blocked_since = Some(now);
                 }
-                _ => {
-                    // recovered or never was blocked — reset the episode
-                    if t.blocked_since.is_some() {
-                        *t = Tracked::default();
-                    }
-                }
+            } else if t.blocked_since.is_some() {
+                // recovered or never was blocked — reset the episode
+                *t = Tracked::default();
             }
 
             let controllable = s.tmux.is_some();
             let mut remaining: Option<i64> = None;
-            if state == SessionState::Red && self.settings.auto_continue {
+            // No countdown for a session we cannot control: showing one would
+            // promise a key press that is never going to happen.
+            if state == SessionState::Red
+                && controllable
+                && self.settings.auto_continue
+                && t.sends < self.settings.max_sends
+            {
                 let next_at = if t.sends == 0 {
                     t.blocked_since.unwrap_or(now) + self.settings.wait_secs as i64
                 } else {
                     t.last_send_at.unwrap_or(now) + self.settings.retry_interval_secs as i64
                 };
-                remaining = Some((next_at - now).max(0));
-                if next_at <= now && controllable && t.sends < self.settings.max_sends {
+                if next_at > now {
+                    remaining = Some(next_at - now);
+                } else {
+                    // Count the attempt right here, while the engine lock is
+                    // still held. Scheduling and bookkeeping have to be one
+                    // step: two polls racing on the same snapshot would
+                    // otherwise both see `sends == 0` and press Enter twice.
+                    t.sends += 1;
+                    t.last_send_at = Some(now);
                     due.push(s.pid);
-                    remaining = Some(0);
+                    if t.sends < self.settings.max_sends {
+                        remaining = Some(self.settings.retry_interval_secs as i64);
+                    }
                 }
             }
 
@@ -190,7 +214,8 @@ impl Engine {
         (views, due)
     }
 
-    /// Mark that resume keys were sent to `pid` (manual or automatic).
+    /// Mark that resume keys were sent to `pid` by hand. Automatic sends are
+    /// counted by `update` itself.
     pub fn record_send(&mut self, pid: i32) {
         let now = self.last_now;
         let t = self.tracked.entry(pid).or_default();
@@ -213,13 +238,14 @@ mod tests {
                 session: "work".into(),
                 window: "0.0".into(),
             }),
-            transcript: None,
+            transcript: Some("/home/john/.claude/projects/x/abc.jsonl".into()),
             session_id: "abc".into(),
             last_type: last_type.into(),
             last_ts: String::new(),
             idle_sec: Some(idle),
             preview: "做点什么".into(),
             tool_running: false,
+            transcript_live: true,
         }
     }
 
@@ -261,45 +287,63 @@ mod tests {
 
     #[test]
     fn auto_continue_fires_after_wait() {
-        let mut st = Settings::default();
-        st.wait_secs = 100;
-        let mut e = Engine::new(st);
+        let mut e = Engine::new(Settings {
+            wait_secs: 100,
+            ..Default::default()
+        });
         let t0 = 10_000;
         let (v, due) = e.update(snap(t0, vec![session(1, "user", 1000)]));
         assert_eq!(v[0].state, SessionState::Red);
         assert!(due.is_empty());
         assert_eq!(v[0].remaining_sec, Some(100));
+        assert_eq!(v[0].sends, 0);
 
         let (v, due) = e.update(snap(t0 + 99, vec![session(1, "user", 1099)]));
         assert!(due.is_empty());
         assert_eq!(v[0].remaining_sec, Some(1));
 
-        let (_, due) = e.update(snap(t0 + 100, vec![session(1, "user", 1100)]));
+        // the attempt is counted when it is scheduled, not by the caller
+        let (v, due) = e.update(snap(t0 + 100, vec![session(1, "user", 1100)]));
+        assert_eq!(due, vec![1]);
+        assert_eq!(v[0].sends, 1);
+        assert_eq!(v[0].last_send_at, Some(t0 + 100));
+        // retry scheduled retry_interval_secs (600) after the send
+        assert_eq!(v[0].remaining_sec, Some(600));
+    }
+
+    #[test]
+    fn a_second_poll_of_the_same_snapshot_never_sends_twice() {
+        let mut e = Engine::new(Settings {
+            wait_secs: 0,
+            ..Default::default()
+        });
+        let t0 = 10_000;
+        let (_, due) = e.update(snap(t0, vec![session(1, "user", 5000)]));
         assert_eq!(due, vec![1]);
 
-        e.record_send(1);
-        let (v, _) = e.update(snap(t0 + 101, vec![session(1, "user", 1101)]));
+        // overlapping poll (slow WSL, a manual refresh) on an unchanged
+        // snapshot: the key press must not be scheduled a second time
+        let (v, due) = e.update(snap(t0, vec![session(1, "user", 5000)]));
+        assert!(due.is_empty());
         assert_eq!(v[0].sends, 1);
-        // retry scheduled retry_interval_secs (600) after the send
-        assert_eq!(v[0].remaining_sec, Some(599));
     }
 
     #[test]
     fn max_sends_cap() {
-        let mut st = Settings::default();
-        st.wait_secs = 0;
-        st.retry_interval_secs = 0;
-        st.max_sends = 2;
-        let mut e = Engine::new(st);
+        let mut e = Engine::new(Settings {
+            wait_secs: 0,
+            retry_interval_secs: 0,
+            max_sends: 2,
+            ..Default::default()
+        });
         let t0 = 10_000;
-        for i in 0..3 {
-            let (_, due) = e.update(snap(t0 + i, vec![session(1, "user", 5000)]));
-            for pid in due {
-                e.record_send(pid);
-            }
+        for i in 0..5 {
+            e.update(snap(t0 + i, vec![session(1, "user", 5000)]));
         }
-        let (v, _) = e.update(snap(t0 + 10, vec![session(1, "user", 5010)]));
+        let (v, due) = e.update(snap(t0 + 10, vec![session(1, "user", 5010)]));
         assert_eq!(v[0].sends, 2);
+        assert!(due.is_empty());
+        assert_eq!(v[0].remaining_sec, None, "no retry once the cap is reached");
     }
 
     #[test]
@@ -323,22 +367,55 @@ mod tests {
     fn not_controllable_without_tmux() {
         let mut s = session(1, "user", 1000);
         s.tmux = None;
-        let mut st = Settings::default();
-        st.wait_secs = 0;
-        let mut e = Engine::new(st);
+        let mut e = Engine::new(Settings {
+            wait_secs: 0,
+            ..Default::default()
+        });
         let t0 = 10_000;
         let (v, due) = e.update(snap(t0, vec![s]));
+        assert_eq!(v[0].state, SessionState::Red);
         assert!(!v[0].controllable);
         assert!(due.is_empty()); // never auto-sends to an uncontrolled session
+        assert_eq!(v[0].remaining_sec, None, "no phantom countdown");
+    }
+
+    /// A process with no transcript yet (or one whose mapping we could not
+    /// establish) must never be treated as stuck — that is what would press
+    /// Enter in a terminal we know nothing about.
+    #[test]
+    fn no_usable_transcript_is_never_red() {
+        let mut e = Engine::new(Settings {
+            wait_secs: 0,
+            ..Default::default()
+        });
+
+        let mut missing = session(1, "user", 99_999);
+        missing.transcript = None;
+        missing.transcript_live = false;
+
+        // a fresh process handed an old session file by the fallback pairing
+        let mut borrowed = session(2, "user", 99_999);
+        borrowed.transcript_live = false;
+
+        let (v, due) = e.update(snap(10_000, vec![missing, borrowed]));
+        assert!(due.is_empty());
+        for view in &v {
+            assert_eq!(view.state, SessionState::Yellow);
+            assert!(view.blocked_since.is_none());
+        }
+        let label = |pid: i32| v.iter().find(|s| s.pid == pid).unwrap().label.clone();
+        assert_eq!(label(1), "未找到记录");
+        assert_eq!(label(2), "记录未就绪");
     }
 
     #[test]
     fn tool_running_never_red() {
         // a long-running tool (assistant entry whose last block is tool_use)
         // must not be classified as blocked, no matter how long it runs
-        let mut st = Settings::default();
-        st.wait_secs = 0;
-        let mut e = Engine::new(st);
+        let mut e = Engine::new(Settings {
+            wait_secs: 0,
+            ..Default::default()
+        });
         let mut s = session(1, "assistant", 7200); // 2h "idle" while tool runs
         s.tool_running = true;
         let t0 = 10_000;

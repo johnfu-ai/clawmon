@@ -23,6 +23,13 @@ except Exception:
     TICKS = 100
 _BOOT = [None]
 
+# How much of a transcript to decode when looking for its last entry, and how
+# far back we are willing to walk for it.
+TAIL_WINDOW = 64 * 1024
+TAIL_WINDOW_MAX = 1024 * 1024
+# Only the last few entries matter; bounds the work on a long window.
+MAX_SCAN_LINES = 200
+
 
 def read_cmdline(pid):
     try:
@@ -32,8 +39,13 @@ def read_cmdline(pid):
         return []
 
 
+_status_cache = {}
+
+
 def read_status(pid):
     """Return dict of /proc/<pid>/status key/values (we need PPid)."""
+    if pid in _status_cache:
+        return _status_cache[pid]
     info = {}
     try:
         with open("/proc/%d/status" % pid) as f:
@@ -43,6 +55,9 @@ def read_status(pid):
                     info[k] = v.strip()
     except OSError:
         pass
+    # ancestor chains overlap heavily between claude processes; one snapshot
+    # per run is plenty and saves a /proc read per process.
+    _status_cache[pid] = info
     return info
 
 
@@ -289,6 +304,50 @@ def json_unescape(s):
         return s
 
 
+def transcript_is_live(path, start):
+    """True when `path` was written by the process that started at `start`.
+
+    A transcript whose last write predates the process cannot belong to it:
+    the fallback pairing heuristics do sometimes hand a fresh process an old
+    session file, and such a record looks "idle for hours" — which would be
+    reported as a stuck session.
+    """
+    if not start:
+        return True  # start time unknown → cannot rule it out
+    try:
+        return os.path.getmtime(path) >= start - 5
+    except OSError:
+        return False
+
+
+def read_tail(path, window=TAIL_WINDOW, limit=TAIL_WINDOW_MAX):
+    """Decode the tail of a file, always starting on a line boundary.
+
+    A single entry can be much larger than the window (a big tool result), and
+    a line cut in half parses as nothing — the session would then look like it
+    has no transcript at all. Grow the window until the first line is complete.
+    """
+    size = os.path.getsize(path)
+    while True:
+        start = max(0, size - window)
+        with open(path, "rb") as fh:
+            if start:
+                fh.seek(start - 1)
+                at_boundary = fh.read(1) == b"\n"
+            else:
+                at_boundary = True
+            data = fh.read()
+        text = data.decode("utf-8", "replace")
+        if at_boundary:
+            return text
+        newline = text.find("\n")
+        if newline >= 0:
+            return text[newline + 1:]
+        if window >= limit:
+            return text  # one line longer than we are willing to buffer
+        window *= 2
+
+
 def last_entry(path):
     """Parse the last complete JSON line of the transcript.
 
@@ -298,13 +357,10 @@ def last_entry(path):
     when the tool finishes, so this is exactly "a tool is executing now".
     """
     try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as fh:
-            fh.seek(max(0, size - 65536))
-            tail = fh.read().decode("utf-8", "replace")
+        tail = read_tail(path)
     except OSError:
         return None
-    lines = [l for l in tail.split("\n") if l.strip()]
+    lines = [l for l in tail.split("\n") if l.strip()][-MAX_SCAN_LINES:]
     entry = None
     session_id = None
     preview = ""
@@ -328,7 +384,8 @@ def last_entry(path):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text" \
                         and block.get("text", "").strip():
-                    preview = block["text"].strip().replace("\n", " ")[:100]
+                    preview = block["text"].strip().replace("\n", " ") \
+                        .replace("\r", " ")[:100]
                     break
         if entry is not None and preview:
             break
@@ -351,7 +408,7 @@ def last_entry(path):
 
 
 def main():
-    now = time_now = datetime.now(timezone.utc)
+    time_now = datetime.now(timezone.utc)
     panes = tmux_panes()
 
     # pass 1: collect every claude process with what /proc can tell us
@@ -409,9 +466,12 @@ def main():
             "idle_sec": None,
             "preview": "",
             "tool_running": False,
+            "transcript_live": False,
         }
         transcript = info["transcript"]
         if transcript:
+            info["transcript_live"] = transcript_is_live(
+                transcript, p["start"])
             le = last_entry(transcript)
             if le:
                 info["session_id"] = le["session_id"]
