@@ -109,3 +109,21 @@ Copy the latest (v0.2.0) source into the user's existing Windows build folder an
 
 ### Outcome
 Fresh v0.2.0 clawmon.exe ready at C:\Users\JohnFoo\clawmon-build\target\release\clawmon.exe for the user to run and verify toasts / pet click-through / sound on the real Windows desktop.
+
+## [2026-09-13 17:25] Codify the local Windows build: CLAUDE.md, scripts, README
+
+### User prompt
+"把这个要求写入claude.md，通过上面成功的方式，在本地编译。并更新readme等artifacts, commit and push to github."
+
+### Goal interpretation
+Persist the proven WSL-drives-Windows-toolchain build method into the project's CLAUDE.md so future sessions use it; actually run a local build that way; document it in README (and other artifacts); commit and push.
+
+### Actions taken
+- Created `CLAUDE.md` (project notes): build/validation commands for this WSL session, the cargo-check-does-not-run-lints pitfall, release process (tag-driven, no local builds), design invariants (poll loop in Rust, yellow-when-unsure, resident-detector degradation), ai-log pointer.
+- Added `scripts/build-local.sh` (syncs repo to C:\Users\<user>\clawmon-build keeping target\ cache, invokes Windows cargo.exe build --release via interop) and `scripts/win-clippy.sh` (cross-target clippy -D warnings, CI parity).
+- Ran `scripts/build-local.sh`: incremental Windows build finished in 1m46s, exe refreshed at C:\Users\JohnFoo\clawmon-build\target\release\clawmon.exe.
+- README: new subsection「在 WSL 里驱动本机 Windows 编译」under 构建, scripts/ added to 项目结构, and the cross-validation section now prescribes win-clippy.sh instead of plain cargo check.
+- Committed and pushed to main.
+
+### Outcome
+The local-build workflow is reproducible with one command and documented for both humans (README) and future Claude sessions (CLAUDE.md). Fresh v0.2.0 exe on the Windows side. Nothing pending.

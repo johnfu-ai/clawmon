@@ -96,6 +96,20 @@ cargo tauri dev
 
 产物在仓库根目录的 `target/release/`（`clawmon.exe` 可直接拷走使用）。
 
+### 在 WSL 里驱动本机 Windows 编译
+
+Windows 侧装好 Rust（`%USERPROFILE%\.cargo`）后，WSL 会话可以直接驱动
+本机工具链出 exe（不经交叉编译，和真机编译完全一致）：
+
+```bash
+scripts/build-local.sh
+```
+
+脚本把仓库镜像到 `C:\Users\<你>\clawmon-build\`（保留 `target\` 作增量
+缓存，排除 `.git`），调用 Windows 的 `cargo.exe build --release`，产物在
+`C:\Users\<你>\clawmon-build\target\release\clawmon.exe`。首次全量约
+十几分钟，其后增量一两分钟。
+
 ## 使用
 
 1. 启动小程序，保持窗口开着（可以最小化、关到系统托盘，后台仍会
@@ -138,6 +152,9 @@ core/                 纯逻辑 crate（不依赖 Tauri，可单独测试）
 src-tauri/
   src/detect.py        内嵌的 WSL 侧检测脚本（一次性 / --serve 常驻两种模式）
   src/lib.rs           轮询线程 + 通知 + Tauri 命令胶水层
+scripts/
+  build-local.sh       WSL 驱动本机 Windows 工具链出 exe（见「构建」一节）
+  win-clippy.sh        从 WSL 跑与 CI windows 作业一致的 clippy
 ui/                   静态前端（HTML/CSS/JS，无构建步骤）
   i18n.js              中英双语字典（zh 为默认，en 为翻译）
   pet.html/pet.js      桌面宠物（透明置顶小窗，最小化后的窗口形态）
@@ -170,12 +187,13 @@ python3 -m py_compile src-tauri/src/detect.py       # 检测脚本
 
 以上（含上面那条端到端用例）都会在 CI 里跑，见 `.github/workflows/ci.yml`。
 
-在 Linux/WSL 上交叉验证 Windows 编译（可选）：
+在 Linux/WSL 上验证 Windows 侧代码（可选）。注意要用 clippy 而不是
+`cargo check`——check 不跑 lint，曾有过 Windows CI 被 `needless_borrow`
+拦下的教训：
 
 ```bash
 rustup target add x86_64-pc-windows-msvc
-RC=.tools/bin/llvm-rc CC_x86_64_pc_windows_msvc=gcc \
-  cargo check --target x86_64-pc-windows-msvc
+scripts/win-clippy.sh    # 等价于 CI windows 作业的 clippy -D warnings
 ```
 
 （`.tools/bin/llvm-rc` 是一个占位 stub，仅为绕过 `tauri-winres` 对资源
