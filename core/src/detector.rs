@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// The embedded WSL-side detection script (single source of truth; it is
-/// piped to `wsl.exe -e python3 -` at runtime).
-pub const DETECT_SCRIPT: &str = include_str!("../../src-tauri/src/detect.py");
+/// piped to `wsl.exe -e python3 -` at runtime). The script lives beside its
+/// Rust adapter and is driven by the tests below — the two halves of the
+/// JSON contract change together.
+pub const DETECT_SCRIPT: &str = include_str!("detect.py");
 
 /// Where the script lands inside the distro for the resident process.
 /// Uploaded again on every (re)spawn, so a volatile path is fine.
@@ -55,12 +57,17 @@ fn trusted() -> bool {
 /// `message.usage` deduped by message id (unique ids ≈ API requests),
 /// subagent transcripts included.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RawUsage {
     #[serde(default)]
     pub input: u64,
-    #[serde(default)]
+    // the aliases are load-bearing: detect.py emits snake_case while the
+    // webview consumes camelCase — without them the inbound pipe breaks.
+    // The serialized shape is pinned by engine::session_view_serializes_
+    // the_wire_contract.
+    #[serde(default, alias = "cache_read")]
     pub cache_read: u64,
-    #[serde(default)]
+    #[serde(default, alias = "cache_creation")]
     pub cache_creation: u64,
     #[serde(default)]
     pub output: u64,
@@ -345,5 +352,124 @@ print(json.dumps(results))
         assert!(st.now_epoch > 0.0);
         let st2 = d.detect(&s).expect("second detect (resident process)");
         assert!(st2.now_epoch >= st.now_epoch);
+    }
+
+    /// The CLAUDE.md invariant: any resident failure must degrade to the
+    /// one-shot pipe for that poll. A broken resident is simulated by
+    /// swapping in a child that always answers with unparseable garbage —
+    /// exactly what a crashed script looks like from here. This also pins
+    /// the subtle half of the trick: the garbage must fail to parse as a
+    /// `RawStatus` (a struct-level serde default would silently turn it
+    /// into "zero sessions").
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn broken_resident_degrades_to_one_shot() {
+        let mut d = Detector::new();
+        let s = Settings::default();
+        let _ = d
+            .detect(&s)
+            .expect("first detect spawns a healthy resident");
+        d.child = Some(
+            Persistent::spawn(
+                "",
+                &["sh", "-c", "while read -r line; do echo not-json; done"],
+            )
+            .expect("saboteur spawns"),
+        );
+        let st = d.detect(&s).expect("poll must still succeed via one-shot");
+        assert!(st.now_epoch > 0.0);
+        // the broken child is gone and the next poll respawns cleanly
+        let st2 = d.detect(&s).expect("third detect (respawned resident)");
+        assert!(st2.now_epoch >= st.now_epoch);
+    }
+
+    /// Drives the real pairing heuristics over a fixture projects tree:
+    /// `--session-id` evidence wins exactly, an older decoy file stays
+    /// unclaimed, and a process whose project dir has nothing falls through
+    /// to the cwd tail-match scan (Linux only; needs a real python3).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pairing_respects_session_id_and_tail_match() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys, time
+
+detect_path, root = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+projects = os.path.join(root, "projects")
+mod.CLAUDE_DIR = projects
+
+xdir = os.path.join(projects, "-tmp-x")
+os.makedirs(xdir)
+sid = "aaaa0000-0000-0000-0000-000000000001"
+sid_file = os.path.join(xdir, sid + ".jsonl")
+old_file = os.path.join(xdir, "bbbb0000-0000-0000-0000-000000000002.jsonl")
+with open(sid_file, "w") as f:
+    f.write('{"type":"user","timestamp":"2026-09-13T00:00:00Z","sessionId":"s1"}\n')
+with open(old_file, "w") as f:
+    f.write('{"type":"user","timestamp":"2026-01-01T00:00:00Z","sessionId":"old"}\n')
+os.utime(old_file, (0, 0))  # the decoy is ancient
+
+# tail-match candidate: lives in another project dir, recent, its last
+# recorded cwd points at /tmp/nowhere
+odir = os.path.join(projects, "-tmp-other")
+os.makedirs(odir)
+tail_file = os.path.join(odir, "cccc0000-0000-0000-0000-000000000003.jsonl")
+with open(tail_file, "w") as f:
+    f.write('{"type":"user","cwd":"/tmp/nowhere","timestamp":"2026-09-13T00:00:00Z","sessionId":"s2"}\n')
+now = time.time()
+os.utime(tail_file, (now, now))
+
+now_epoch = 1789000000.0
+procs = [
+    {"pid": 101, "cmd": ["claude", "--session-id", sid],
+     "cwd": "/tmp/x", "tty": "", "tmux": None, "start": now_epoch},
+    {"pid": 102, "cmd": ["claude"],
+     "cwd": "/tmp/nowhere", "tty": "", "tmux": None, "start": now_epoch},
+]
+mapping = mod.assign_transcripts(procs)
+print(json.dumps({str(k): os.path.basename(v) if v else None
+                  for k, v in mapping.items()}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mapping: std::collections::HashMap<String, Option<String>> =
+            serde_json::from_slice(&out.stdout).expect("driver printed the mapping");
+        assert_eq!(
+            mapping.get("101").unwrap().as_deref(),
+            Some("aaaa0000-0000-0000-0000-000000000001.jsonl"),
+            "--session-id evidence must win exactly"
+        );
+        assert_eq!(
+            mapping.get("102").unwrap().as_deref(),
+            Some("cccc0000-0000-0000-0000-000000000003.jsonl"),
+            "no local candidates -> the cwd tail-match scan applies"
+        );
+        assert!(
+            !mapping
+                .values()
+                .any(|v| v.as_deref() == Some("bbbb0000-0000-0000-0000-000000000002.jsonl")),
+            "the old decoy must stay unclaimed"
+        );
     }
 }

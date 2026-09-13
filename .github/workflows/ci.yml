@@ -37,8 +37,8 @@ jobs:
       - name: Live integration tests
         run: cargo test -p clawmon-core --test integration -- --ignored --test-threads=1
 
-      - name: Detection script compiles
-        run: python3 -m py_compile src-tauri/src/detect.py
+      - name: WSL scripts compile
+        run: python3 -m py_compile core/src/detect.py core/src/usage.py
 
   # The Tauri shell only builds on Windows (WebView2); check it here so the
   # app-facing code is not left to a release build to type-check.
