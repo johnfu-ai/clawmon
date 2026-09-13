@@ -2,7 +2,9 @@
 //! environment with tmux — run with `cargo test -p clawmon-core --test
 //! integration -- --ignored`.
 
-use clawmon_core::{detect, wsl::run_wsl, Engine, SessionState, SessionView, Settings};
+use clawmon_core::{
+    detect, engine::Reason, wsl::tmux_send_keys, Engine, SessionState, SessionView, Settings,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -90,8 +92,8 @@ impl Drop for Fixture {
 
 fn run(settings: &Settings) -> (Vec<SessionView>, Vec<i32>, clawmon_core::RawStatus) {
     let snap = detect(settings).expect("detect");
-    let mut e = Engine::new(settings.clone());
-    let (views, due, _) = e.update(snap.clone());
+    let mut e = Engine::new();
+    let (views, due, _) = e.update(snap.clone(), settings);
     (views, due, snap)
 }
 
@@ -114,9 +116,9 @@ fn detects_blocked_session_and_auto_continues() {
         .find(|v| v.cwd == fx.cwd.to_str().unwrap())
         .expect("fixture session not detected");
     assert_eq!(v.state, SessionState::Red, "stale user entry must be red");
-    assert_eq!(v.label, "疑似 API 超时");
+    assert_eq!(v.reason, Reason::ResponseTimedOut);
     assert!(v.controllable, "tmux session should be controllable");
-    assert!(v.remaining_sec.is_some());
+    assert!(v.countdown.is_some());
     // usage rides along the whole pipe: transcript → detector → view
     let u = v.usage.expect("fixture usage detected");
     assert_eq!(
@@ -126,8 +128,8 @@ fn detects_blocked_session_and_auto_continues() {
 
     // full pass with the engine, mirroring what the poll loop does
     let snap = detect(&st).unwrap();
-    let mut e = Engine::new(st.clone());
-    let (_, due, _) = e.update(snap);
+    let mut e = Engine::new();
+    let (_, due, _) = e.update(snap, &st);
     assert!(!due.is_empty(), "auto-continue must fire with wait_secs=0");
     for pid in due {
         let pane = e
@@ -139,10 +141,8 @@ fn detects_blocked_session_and_auto_continues() {
             .pane
             .clone();
         let keys: Vec<&str> = st.resume_keys.split_whitespace().collect();
-        let mut args: Vec<&str> = vec!["tmux", "send-keys", "-t", &pane];
-        args.extend(keys.iter().copied());
-        run_wsl("", &args).expect("send-keys");
-        // no record_send here: update() already counted the attempt
+        tmux_send_keys("", &pane, &keys).expect("send-keys");
+        // no claim_send here: update() already booked the attempt
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -242,8 +242,8 @@ fn concurrent_sessions_get_distinct_transcripts() {
         .collect();
     assert_eq!(ours.len(), 2, "both fake claude processes must be found");
 
-    let mut e = Engine::new(st);
-    let (views, _, _) = e.update(snap);
+    let mut e = Engine::new();
+    let (views, _, _) = e.update(snap, &st);
     let views: Vec<_> = views
         .into_iter()
         .filter(|v| v.cwd == "/tmp/clawmon-it2")
@@ -266,7 +266,7 @@ fn concurrent_sessions_get_distinct_transcripts() {
         .collect();
     assert_eq!(red.len(), 1, "exactly one session must be red");
     assert_eq!(red[0].session_id, "sess-a");
-    assert_eq!(red[0].label, "疑似 API 超时");
+    assert_eq!(red[0].reason, Reason::ResponseTimedOut);
 
     let green: Vec<_> = views
         .iter()

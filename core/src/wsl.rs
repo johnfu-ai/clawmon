@@ -138,6 +138,15 @@ pub fn run_wsl(distro: &str, args: &[&str]) -> Result<String, String> {
     )
 }
 
+/// Send tmux key names to a pane. Keys travel as argv entries, never through
+/// a shell. The shell's send paths and the integration test share this so
+/// the command shape has exactly one home.
+pub fn tmux_send_keys(distro: &str, pane: &str, keys: &[&str]) -> Result<(), String> {
+    let mut args: Vec<&str> = vec!["tmux", "send-keys", "-t", pane];
+    args.extend_from_slice(keys);
+    run_wsl(distro, &args).map(|_| ())
+}
+
 /// Run a command inside WSL, feeding `input` on stdin.
 /// Used for `python3 -` (script on stdin).
 pub fn run_wsl_stdin(distro: &str, args: &[&str], input: &str) -> Result<String, String> {
