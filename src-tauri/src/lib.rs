@@ -1,6 +1,9 @@
 use clawmon_core::{
-    engine::SessionView, settings::Settings, usage::UsageInfo, wsl::run_wsl, Detector, Engine,
-    EventKind, SessionEvent,
+    engine::{state_counts, SessionView},
+    settings::Settings,
+    usage::UsageInfo,
+    wsl::tmux_send_keys,
+    Detector, Engine, EventKind, SessionEvent,
 };
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -13,15 +16,19 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 
+/// Lock rule: never hold two AppState mutexes at once. Take what you need,
+/// clone out, drop the guard — the next acquisition is a different one.
 struct AppState {
+    /// the poll state machine + the last snapshot it computed (the poll
+    /// thread is the only writer)
     engine: Mutex<Engine>,
-    /// the resident detection process, kept across polls
-    detector: Mutex<Detector>,
+    /// live settings, single owner — the engine takes them by reference on
+    /// every update so it never doubles as a config store
+    settings: Mutex<Settings>,
     settings_path: PathBuf,
-    /// The latest snapshot, served to the webview on demand. The window is a
-    /// viewer only: the poll loop below keeps running (and keeps pushing
-    /// events at it) whether or not there is a window on screen.
-    last: Mutex<StatusResponse>,
+    /// non-fatal problem (e.g. WSL unreachable) for the banner; the sessions
+    /// themselves live in the engine's last_views()
+    warning: Mutex<Option<String>>,
     /// Latest plan-quota snapshot from the usage loop below.
     last_usage: Mutex<Option<UsageInfo>>,
 }
@@ -35,36 +42,10 @@ struct StatusResponse {
 }
 
 /// Lock a mutex, recovering from poisoning. A panic in one command must not
-/// brick the monitor for the rest of the session.
+/// brick the monitor for the rest of the session — this is the one poison
+/// policy, used by every site including the window-close handler.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// (red, yellow, green) session counts, pushed to the tray tooltip and the pet.
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StatusCounts {
-    red: u32,
-    yellow: u32,
-    green: u32,
-    warning: bool,
-}
-
-fn state_counts(sessions: &[SessionView]) -> StatusCounts {
-    let mut c = StatusCounts {
-        red: 0,
-        yellow: 0,
-        green: 0,
-        warning: false,
-    };
-    for s in sessions {
-        match s.state {
-            clawmon_core::engine::SessionState::Red => c.red += 1,
-            clawmon_core::engine::SessionState::Yellow => c.yellow += 1,
-            clawmon_core::engine::SessionState::Green => c.green += 1,
-        }
-    }
-    c
 }
 
 /// System alert sound. Toasts already carry their own chime on Windows,
@@ -89,6 +70,12 @@ fn notify(app: &tauri::AppHandle, title: &str, body: &str, sound: bool) {
     }
     let _ = app.notification().builder().title(title).body(body).show();
 }
+
+// ---- native copy ---------------------------------------------------------
+//
+// The webview's text lives in ui/i18n.js; native surfaces (notifications,
+// tray) are formatted here in the shell. No bundler bridges the two, so the
+// language setting drives both sides separately — by design.
 
 /// (title, body) for a session event, in the configured language.
 fn event_text(lang: &str, kind: EventKind, project: &str) -> (&'static str, String) {
@@ -141,6 +128,21 @@ fn event_text(lang: &str, kind: EventKind, project: &str) -> (&'static str, Stri
     }
 }
 
+/// (title, body) for the auto-continue receipt, in the configured language.
+fn auto_continue_text(lang: &str, keys: &str, project: &str, count: u32) -> (&'static str, String) {
+    if lang == "en" {
+        (
+            "Auto-continue sent",
+            format!("▶ Sent \"{keys}\" to {project} (attempt {count})"),
+        )
+    } else {
+        (
+            "已自动继续",
+            format!("▶ 已向 {project} 发送「{keys}」（第 {count} 次）"),
+        )
+    }
+}
+
 /// Turn a state transition into a notification, honoring the per-kind
 /// switches. `settings` is the copy this poll started with, so flipping a
 /// switch takes effect on the next poll at the latest.
@@ -167,35 +169,30 @@ fn settings_path(app: &tauri::AppHandle) -> PathBuf {
 
 /// Update the tray tooltip and the desktop pet with the current light counts.
 fn update_status_followers(app: &tauri::AppHandle, sessions: &[SessionView], warning: bool) {
-    let c = state_counts(sessions);
+    let mut c = state_counts(sessions);
+    c.warning = warning;
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(&format!(
             "clawmon — 🔴{} 🟡{} 🟢{}",
             c.red, c.yellow, c.green
         )));
     }
-    let _ = app.emit(
-        "status",
-        StatusCounts {
-            warning,
-            ..c.clone()
-        },
-    );
+    let _ = app.emit("status", c);
 }
 
 /// One monitoring pass: detect the sessions inside WSL, fold the result into
 /// the state machine, fire whatever auto-continue has come due and push the
 /// outcome to the tray and the windows. Returns the delay until the next pass.
-fn poll(app: &tauri::AppHandle) -> u64 {
+fn poll(app: &tauri::AppHandle, detector: &mut Detector) -> u64 {
     let state = app.state::<AppState>();
-    let settings = lock(&state.engine).settings.clone();
+    let settings = lock(&state.settings).clone();
     let interval = settings.poll_interval_secs;
 
-    let (sessions, warning) = match lock(&state.detector).detect(&settings) {
+    let (sessions, warning) = match detector.detect(&settings) {
         Ok(snap) => {
             // `update` counts every attempt it schedules, so sending the keys
             // below cannot be double-booked by a later poll.
-            let (views, due, events) = lock(&state.engine).update(snap);
+            let (views, due, events) = lock(&state.engine).update(snap, &settings);
             for ev in events {
                 dispatch_event(app, &settings, ev);
             }
@@ -215,24 +212,12 @@ fn poll(app: &tauri::AppHandle) -> u64 {
                                 .find(|v| v.pid == pid)
                                 .map(|v| v.project.clone())
                                 .unwrap_or_default();
-                            let en = settings.language == "en";
-                            let (title, body) = if en {
-                                (
-                                    "Auto-continue sent",
-                                    format!(
-                                        "▶ Sent \"{}\" to {project} (attempt {count})",
-                                        settings.resume_keys
-                                    ),
-                                )
-                            } else {
-                                (
-                                    "已自动继续",
-                                    format!(
-                                        "▶ 已向 {project} 发送「{}」（第 {count} 次）",
-                                        settings.resume_keys
-                                    ),
-                                )
-                            };
+                            let (title, body) = auto_continue_text(
+                                &settings.language,
+                                &settings.resume_keys,
+                                &project,
+                                count,
+                            );
                             notify(app, title, &body, settings.sound_alerts);
                         }
                     }
@@ -246,10 +231,9 @@ fn poll(app: &tauri::AppHandle) -> u64 {
         Err(e) => (lock(&state.engine).last_views(), Some(e)),
     };
 
-    let response = StatusResponse { sessions, warning };
-    update_status_followers(app, &response.sessions, response.warning.is_some());
-    *lock(&state.last) = response.clone();
-    let _ = app.emit("sessions", response);
+    *lock(&state.warning) = warning.clone();
+    update_status_followers(app, &sessions, warning.is_some());
+    let _ = app.emit("sessions", StatusResponse { sessions, warning });
     interval
 }
 
@@ -257,11 +241,15 @@ fn poll(app: &tauri::AppHandle) -> u64 {
 /// throttles timers in hidden windows down to roughly one wake-up per minute,
 /// so a JS-driven poll would slow to a crawl exactly when the window sits in
 /// the tray or is minimized to the pet — the state the auto-continue has to
-/// keep working in.
+/// keep working in. The detector belongs to this thread alone: nothing else
+/// talks to it, so it needs no lock.
 fn spawn_poll_loop(app: tauri::AppHandle) {
-    thread::spawn(move || loop {
-        let interval = poll(&app);
-        thread::sleep(Duration::from_secs(interval.max(1)));
+    thread::spawn(move || {
+        let mut detector = Detector::new();
+        loop {
+            let interval = poll(&app, &mut detector);
+            thread::sleep(Duration::from_secs(interval.max(1)));
+        }
     });
 }
 
@@ -278,11 +266,7 @@ fn spawn_usage_loop(app: tauri::AppHandle) {
     thread::spawn(move || {
         let mut was_enabled = true;
         loop {
-            let settings = {
-                let state = app.state::<AppState>();
-                let engine = lock(&state.engine);
-                engine.settings.clone()
-            };
+            let settings = lock(&app.state::<AppState>().settings).clone();
             if settings.show_glm_usage {
                 match clawmon_core::usage::query_usage(&settings) {
                     Ok(info) => {
@@ -309,7 +293,9 @@ fn spawn_usage_loop(app: tauri::AppHandle) {
 /// restored from the tray. Detection itself is driven by the poll loop.
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<StatusResponse, String> {
-    Ok(lock(&state.last).clone())
+    let sessions = lock(&state.engine).last_views();
+    let warning = lock(&state.warning).clone();
+    Ok(StatusResponse { sessions, warning })
 }
 
 /// Latest plan-quota snapshot for the header chip's initial paint; the
@@ -329,71 +315,84 @@ fn pet_clicked(app: tauri::AppHandle) {
 /// Send the configured resume keys to a session's tmux pane right now.
 #[tauri::command]
 async fn send_continue(state: State<'_, AppState>, pid: i32) -> Result<String, String> {
-    let (pane, keys, distro, lang) = resume_target(&state, pid)?;
+    let (pane, keys, distro, lang) = manual_target(&state, pid)?;
     // the key press itself is a blocking WSL round trip (up to the command
-    // timeout) — keep it off the async workers
+    // timeout) — keep it off the async workers. The attempt was already
+    // booked before this point, so a poll firing mid-round-trip reschedules
+    // instead of sending a second Enter.
     let message =
         tauri::async_runtime::spawn_blocking(move || send_keys(pane, keys, distro, &lang))
             .await
             .map_err(|e| format!("发送任务失败: {e}"))??;
-    lock(&state.engine).record_send(pid);
     Ok(message)
 }
 
-/// What to send and where, resolved from the last snapshot.
-fn resume_target(
+/// (resume keys, distro, language) — the settings half of any send.
+fn send_settings(state: &State<'_, AppState>) -> (Vec<String>, String, String) {
+    let s = lock(&state.settings);
+    let keys = s
+        .resume_keys
+        .split_whitespace()
+        .map(|k| k.to_string())
+        .collect();
+    (keys, s.wsl_distro.clone(), s.language.clone())
+}
+
+/// The pane a session lives in, from the last snapshot.
+fn pane_for(state: &State<'_, AppState>, pid: i32) -> Result<String, String> {
+    lock(&state.engine)
+        .get_session(pid)
+        .and_then(|s| s.tmux.as_ref().map(|t| t.pane.clone()))
+        .ok_or_else(|| format!("会话 {pid} 不在 tmux 中，无法控制"))
+}
+
+/// The auto-continue path: `update` already booked the attempt under the
+/// engine lock, so this only resolves where to send.
+fn send_resume(state: &State<'_, AppState>, pid: i32) -> Result<String, String> {
+    let (keys, distro, lang) = send_settings(state);
+    let pane = pane_for(state, pid)?;
+    send_keys(pane, keys, distro, &lang)
+}
+
+/// The manual path: resolve the pane AND book the attempt in the same
+/// critical section, before any blocking work — the same claim-then-execute
+/// invariant `update` applies to auto-sends.
+fn manual_target(
     state: &State<'_, AppState>,
     pid: i32,
 ) -> Result<(String, Vec<String>, String, String), String> {
-    let engine = lock(&state.engine);
-    let pane = engine
-        .get_session(pid)
-        .and_then(|s| s.tmux.as_ref().map(|t| t.pane.clone()))
-        .ok_or_else(|| format!("会话 {pid} 不在 tmux 中，无法控制"))?;
-    let keys: Vec<String> = engine
-        .settings
-        .resume_keys
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
-    Ok((
-        pane,
-        keys,
-        engine.settings.wsl_distro.clone(),
-        engine.settings.language.clone(),
-    ))
+    let (keys, distro, lang) = send_settings(state);
+    let pane = {
+        let mut engine = lock(&state.engine);
+        let pane = engine
+            .get_session(pid)
+            .and_then(|s| s.tmux.as_ref().map(|t| t.pane.clone()))
+            .ok_or_else(|| format!("会话 {pid} 不在 tmux 中，无法控制"))?;
+        engine.claim_send(pid);
+        pane
+    };
+    Ok((pane, keys, distro, lang))
 }
 
-/// Blocking `tmux send-keys` inside WSL. Keys are passed as argv entries, never
-/// through a shell.
+/// Blocking `tmux send-keys` inside WSL, plus the receipt message.
 fn send_keys(
     pane: String,
     keys: Vec<String>,
     distro: String,
     lang: &str,
 ) -> Result<String, String> {
-    let mut args: Vec<&str> = vec!["tmux", "send-keys", "-t", &pane];
-    for k in &keys {
-        args.push(k);
-    }
-    run_wsl(&distro, &args).map(|_| {
-        if lang == "en" {
-            format!("Sent {} → {pane}", keys.join(" "))
-        } else {
-            format!("已发送 {} → {pane}", keys.join(" "))
-        }
+    let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    tmux_send_keys(&distro, &pane, &key_refs)?;
+    Ok(if lang == "en" {
+        format!("Sent {} → {pane}", keys.join(" "))
+    } else {
+        format!("已发送 {} → {pane}", keys.join(" "))
     })
-}
-
-/// The auto-continue path: already runs on the poll thread, so it can block.
-fn send_resume(state: &State<'_, AppState>, pid: i32) -> Result<String, String> {
-    let (pane, keys, distro, lang) = resume_target(state, pid)?;
-    send_keys(pane, keys, distro, &lang)
 }
 
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    Ok(lock(&state.engine).settings.clone())
+    Ok(lock(&state.settings).clone())
 }
 
 #[tauri::command]
@@ -406,7 +405,7 @@ async fn set_settings(
     // anything starts acting on the values
     let settings = settings.sanitize();
     settings.save(&state.settings_path)?;
-    lock(&state.engine).settings = settings.clone();
+    *lock(&state.settings) = settings.clone();
     // the pet and the main window pick up language changes from this
     let _ = app.emit("settings", settings);
     Ok(())
@@ -488,8 +487,11 @@ fn spawn_pet_hit_test(app: tauri::AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     thread::spawn(move || {
-        // the crab fills ~92 of the 110 px window; the badge juts a little
-        // further into the margin
+        // The drawing facts (ui/pet.html + tauri.conf.json): the crab is
+        // 92 px centered in the 110 px window (→ 9 px margin), and the badge
+        // juts to 4 px from the edge. 6 keeps the whole badge clickable while
+        // still excluding the window's transparent corners. Change these
+        // together — this constant is the hit-test half of the pet's geometry.
         const INSET: i32 = 6;
         let mut through: Option<bool> = None;
         loop {
@@ -523,18 +525,45 @@ fn spawn_pet_hit_test(app: tauri::AppHandle) {
 #[cfg(not(windows))]
 fn spawn_pet_hit_test(_app: tauri::AppHandle) {}
 
+/// A second instance would run a second poll loop and a second pet. A named
+/// mutex is the cheapest guard that cannot go stale: the kernel releases it
+/// when the owning process dies, unlike a lock file. Windows only.
+#[cfg(windows)]
+fn ensure_single_instance() {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "com.statebar.clawmon.single-instance\0"
+        .encode_utf16()
+        .collect();
+    unsafe {
+        // The handle is intentionally leaked: it must live as long as the
+        // process for the mutex to exist.
+        let _ = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            std::process::exit(0);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_single_instance() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ensure_single_instance();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let path = settings_path(app.handle());
             let settings = Settings::load(&path);
             app.manage(AppState {
-                engine: Mutex::new(Engine::new(settings.clone())),
-                detector: Mutex::new(Detector::new()),
+                engine: Mutex::new(Engine::new()),
+                settings: Mutex::new(settings.clone()),
                 settings_path: path,
-                last: Mutex::new(StatusResponse::default()),
+                warning: Mutex::new(None),
                 last_usage: Mutex::new(None),
             });
 
@@ -565,8 +594,25 @@ pub fn run() {
             show_pet(app.handle());
 
             // system tray: keeps the monitor alive with the window closed
-            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let en = settings.language == "en";
+            let show = MenuItem::with_id(
+                app,
+                "show",
+                if en {
+                    "Show main window"
+                } else {
+                    "显示主窗口"
+                },
+                true,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(
+                app,
+                "quit",
+                if en { "Quit" } else { "退出" },
+                true,
+                None::<&str>,
+            )?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
@@ -593,13 +639,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { api, .. } => {
-                let to_tray = window
-                    .app_handle()
-                    .state::<AppState>()
-                    .engine
-                    .lock()
-                    .map(|e| e.settings.close_to_tray)
-                    .unwrap_or(true);
+                let to_tray = lock(&window.app_handle().state::<AppState>().settings).close_to_tray;
                 if to_tray {
                     api.prevent_close();
                     let _ = window.hide();

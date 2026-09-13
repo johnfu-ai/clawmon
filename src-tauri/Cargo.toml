@@ -20,10 +20,14 @@ serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 # SW_SHOWNOACTIVATE (pet without stealing focus), MessageBeep (alerts),
-# GetCursorPos/GetAsyncKeyState (pet click-through hotspot)
+# GetCursorPos/GetAsyncKeyState (pet click-through hotspot),
+# CreateMutexW (single-instance guard; its signature mentions
+# SECURITY_ATTRIBUTES, hence Win32_Security)
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
 ] }
