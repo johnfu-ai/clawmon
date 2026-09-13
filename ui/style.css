@@ -201,28 +201,6 @@ button.act:disabled { opacity: 0.4; cursor: default; }
   width: 16px; height: 16px; margin: 0;
 }
 .settings label.check-row span { color: var(--text); }
-.settings .row-inline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.settings .row-inline .hint { flex: 1; }
-.settings button.mini {
-  background: var(--border);
-  color: var(--text);
-  border: none;
-  padding: 6px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.settings button.mini:hover { background: #2a3547; }
-.settings button.mini.install {
-  background: var(--accent);
-  color: #0b111e;
-  font-weight: 600;
-}
 .settings .hidden { display: none; }
 .settings-actions { display: flex; gap: 8px; }
 .settings-actions .primary {

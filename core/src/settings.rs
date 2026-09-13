@@ -42,8 +42,6 @@ pub struct Settings {
     pub notify_exit: bool,
     /// Play a system sound alongside the notifications above.
     pub sound_alerts: bool,
-    /// Check GitHub releases for a newer version at startup.
-    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -66,7 +64,6 @@ impl Default for Settings {
             notify_turn_end: false,
             notify_exit: true,
             sound_alerts: true,
-            auto_update: true,
         }
     }
 }

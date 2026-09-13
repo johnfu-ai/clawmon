@@ -10,7 +10,6 @@ const $ = (id) => document.getElementById(id);
    has to keep working in. */
 let snapshot = { sessions: [], warning: null };
 let snapshotAt = Date.now();
-let updateVersion = null;
 
 function fmtIdle(sec) {
   if (sec == null) return "—";
@@ -253,50 +252,12 @@ async function saveSettings(ev) {
   }
 }
 
-/* ---------- updates ---------- */
-
-function setUpdateUi(version) {
-  updateVersion = version;
-  $("btn-install-update").classList.toggle("hidden", !version);
-  $("btn-check-update").classList.toggle("hidden", !!version);
-}
-
-async function onUpdateCheck() {
-  const btn = $("btn-check-update");
-  btn.disabled = true;
-  btn.textContent = t("set.checking");
-  try {
-    const v = await invoke("check_update");
-    if (v) {
-      setUpdateUi(v);
-      toast(t("toast.newversion", { v }));
-    } else {
-      toast(t("toast.uptodate"));
-    }
-  } catch (e) {
-    toast(String(e), true);
-  }
-  btn.disabled = false;
-  btn.textContent = t("set.check");
-}
-
-async function onInstallUpdate() {
-  try {
-    toast(t("toast.installing"));
-    await invoke("install_update"); // the app relaunches itself when done
-  } catch (e) {
-    toast(String(e), true);
-  }
-}
-
 /* ---------- boot ---------- */
 
 window.addEventListener("DOMContentLoaded", async () => {
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-cancel-settings").addEventListener("click", closeSettings);
   $("settings-form").addEventListener("submit", saveSettings);
-  $("btn-check-update").addEventListener("click", onUpdateCheck);
-  $("btn-install-update").addEventListener("click", onInstallUpdate);
 
   // language first, so the very first paint already uses it
   try {
@@ -304,17 +265,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   } catch (_) { /* zh stays */ }
   listen("settings", (e) => setLang(e.payload.language));
 
-  try {
-    const v = await window.__TAURI__.app.getVersion();
-    $("update-info").textContent = `clawmon v${v}`;
-  } catch (_) { /* version line stays empty */ }
-
   // every poll the backend makes ends up here
   listen("sessions", (event) => render(event.payload.sessions, event.payload.warning));
-  listen("update-available", (event) => {
-    setUpdateUi(event.payload);
-    toast(t("toast.newversion", { v: event.payload }));
-  });
   await refresh();
 
   // WebView2 stops running this page's scripts while the window is hidden

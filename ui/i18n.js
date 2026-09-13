@@ -30,11 +30,6 @@ const T = {
   "set.notify.turn": ["回合结束等待输入时", "When a turn finishes, waiting for input"],
   "set.notify.exit": ["会话进程退出时", "When a session process exits"],
   "set.sound": ["提示音（伴随通知）", "Alert sound with notifications"],
-  "set.about": ["关于", "About"],
-  "set.autoupdate": ["启动时检查更新", "Check for updates at startup"],
-  "set.check": ["检查更新", "Check for updates"],
-  "set.checking": ["检查中…", "Checking…"],
-  "set.install": ["下载并安装", "Download and install"],
   "act.save": ["保存", "Save"],
   "act.close": ["关闭", "Close"],
   "act.continue": ["立即继续", "Continue now"],
@@ -68,9 +63,6 @@ const T = {
 
   /* toasts */
   "toast.saved": ["设置已保存", "Settings saved"],
-  "toast.newversion": ["发现新版本 v{v}，可在设置中安装", "New version v{v} available — install it from Settings"],
-  "toast.uptodate": ["已是最新版本", "Already up to date"],
-  "toast.installing": ["开始下载更新，完成后应用会自动重启", "Downloading the update; the app restarts when done"],
 };
 
 /* the engine's status labels arrive in Chinese; translate for display only */

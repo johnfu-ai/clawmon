@@ -41,3 +41,18 @@ Implement every item from the earlier review's suggestion list: (1) Windows toas
 
 ### Outcome
 All nine items implemented. Verified: cargo fmt --check, clippy -D warnings (core), 32 unit tests + 2 live tmux integration tests pass, py_compile OK, `cargo check --target x86_64-pc-windows-msvc` clean for the full shell (notification/updater/process plugins included), JS syntax + i18n logic tests pass. Windows-only runtime behavior (toasts, hit-test, beep) is compile-verified only — needs one real Windows run to confirm. Pending user decisions: commit/tag v0.2.0, and whether to upload the signing key as repo secrets (commands in README). No code is committed yet — left in the working tree for review.
+
+## [2026-09-13 16:05] Answer key/cross-compile questions, commit v0.2.0
+
+### User prompt
+"1. 为什么要密钥？ 2.提交代码 3.但是这个是windows程序，不可以在windows自编译吗？"
+
+### Goal interpretation
+Explain why the updater signing key exists, commit the finished v0.2.0 work, and clarify whether the Windows program must be cross-compiled from WSL or can build natively on Windows.
+
+### Actions taken
+- Committed the working tree to main as `453ff46` (21 files, +2276/−162) with a detailed English message and the required Co-Authored-By trailer. Not pushed; no tag created.
+- Explained (in chat): the key signs update artifacts only (updater authenticity); builds/releases work without it; private key stays at ~/.tauri/clawmon.key. Explained: native Windows build is the intended path (CI already builds on windows-latest); the WSL cross-check was only a local pre-flight validation.
+
+### Outcome
+v0.2.0 committed locally on main. Pending: push, optional tag v0.2.0 + signing-key secrets for auto-update artifacts, and a real-Windows runtime test of toasts/click-through/beep.

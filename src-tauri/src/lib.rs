@@ -12,7 +12,6 @@ use tauri::{
     Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
-use tauri_plugin_updater::UpdaterExt;
 
 struct AppState {
     engine: Mutex<Engine>,
@@ -363,48 +362,6 @@ async fn set_settings(
     Ok(())
 }
 
-/// Latest published version, when one is newer than ours. Blocking.
-fn check_for_update(app: &tauri::AppHandle) -> Result<Option<String>, String> {
-    let update = tauri::async_runtime::block_on(app.updater().map_err(|e| e.to_string())?.check())
-        .map_err(|e| e.to_string())?;
-    Ok(update.map(|u| u.version))
-}
-
-/// Courtesy startup check: runs off the UI thread and only ever speaks
-/// through the `update-available` event. Failures are silent — an offline
-/// machine must not greet every start with an error.
-fn spawn_update_check(app: tauri::AppHandle) {
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(5));
-        if let Ok(Some(version)) = check_for_update(&app) {
-            let _ = app.emit("update-available", version);
-        }
-    });
-}
-
-/// Manual "check for updates" from the settings panel.
-#[tauri::command]
-async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    // the round trip blocks on the network — keep it off the async workers
-    tauri::async_runtime::spawn_blocking(move || check_for_update(&app))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-/// Download, install and restart. Only called when an update is confirmed
-/// to exist; the app relaunches itself before this returns.
-#[tauri::command]
-async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    let update = tauri::async_runtime::block_on(updater.check())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "已是最新版本".to_string())?;
-    tauri::async_runtime::block_on(update.download_and_install(|_, _| {}, || {}))
-        .map_err(|e| e.to_string())?;
-    // never returns on success
-    app.restart()
-}
-
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(pet) = app.get_webview_window("pet") {
         let _ = pet.hide();
@@ -492,8 +449,6 @@ fn spawn_pet_hit_test(_app: tauri::AppHandle) {}
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let path = settings_path(app.handle());
             let settings = Settings::load(&path);
@@ -508,9 +463,6 @@ pub fn run() {
             // the tray must not pause anything
             spawn_poll_loop(app.handle().clone());
 
-            if settings.auto_update {
-                spawn_update_check(app.handle().clone());
-            }
             spawn_pet_hit_test(app.handle().clone());
 
             // park the pet in the bottom-right corner of the primary monitor
@@ -590,9 +542,7 @@ pub fn run() {
             send_continue,
             get_settings,
             set_settings,
-            pet_clicked,
-            check_update,
-            install_update
+            pet_clicked
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

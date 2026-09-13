@@ -69,20 +69,6 @@ Claude Code 终端会话，用 **红 / 黄 / 绿灯** 展示状态，并在 **AP
 | 回合结束 | 关 | claude 跑完一轮、等待下一步输入时 |
 | 会话退出 | 开 | claude 进程消失（正常结束或崩溃） |
 
-### 自动更新
-
-应用内置更新器（设置里可手动「检查更新 / 下载并安装」，启动时也会静默
-检查一次，发现新版本只做提示）。发布流水线在配置了签名私钥
-（`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-两个仓库 secret）时，会为 MSI 产出签名与 `latest.json` 清单并挂到
-release 上；未配置时构建照常出安装包，只是没有更新器工件。私钥默认生成
-在 `~/.tauri/clawmon.key`，**不进仓库**，上传 secret 需要用户自行操作：
-
-```bash
-gh secret set TAURI_SIGNING_PRIVATE_KEY -R johnfu-ai/clawmon < ~/.tauri/clawmon.key
-gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R johnfu-ai/clawmon --body ""
-```
-
 ### 推荐的 WSL 使用方式
 
 ```bash
@@ -140,7 +126,6 @@ cargo tauri dev
 | 语言 | 中文 | 界面与通知语言：中文 / English |
 | 通知 ×5 | 见上表 | 变红 / 自动继续 / 恢复 / 回合结束 / 退出，逐项开关 |
 | 提示音 | 开 | 通知伴随一声系统提示音 |
-| 启动时检查更新 | 开 | 静默检查 GitHub release，发现新版本仅提示；设置里可手动检查并安装 |
 
 ## 项目结构
 
@@ -152,7 +137,7 @@ core/                 纯逻辑 crate（不依赖 Tauri，可单独测试）
   src/wsl.rs           wsl.exe 调用封装（Windows）/ 直接调用（Linux 测试）+ 常驻子进程
 src-tauri/
   src/detect.py        内嵌的 WSL 侧检测脚本（一次性 / --serve 常驻两种模式）
-  src/lib.rs           轮询线程 + 通知 + 更新器 + Tauri 命令胶水层
+  src/lib.rs           轮询线程 + 通知 + Tauri 命令胶水层
 ui/                   静态前端（HTML/CSS/JS，无构建步骤）
   i18n.js              中英双语字典（zh 为默认，en 为翻译）
   pet.html/pet.js      桌面宠物（透明置顶小窗，最小化后的窗口形态）
