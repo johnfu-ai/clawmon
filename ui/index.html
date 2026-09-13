@@ -37,32 +37,35 @@
           <option value="en">English</option>
         </select>
       </label>
+      <!-- number inputs are `required` so the browser blocks empty/invalid
+           submission; min/max mirror Settings::sanitize, which owns the
+           bounds (e.g. the wait may run to 7 days for a weekly quota) -->
       <label><span data-i18n="set.poll">轮询间隔（秒）</span>
-        <input type="number" name="pollIntervalSecs" min="2" max="120" />
+        <input type="number" name="pollIntervalSecs" min="2" max="3600" required />
       </label>
       <label><span data-i18n="set.idle">活跃判定（秒）——多长时间无输出算“空闲”</span>
-        <input type="number" name="idleGreenSecs" min="10" max="3600" />
+        <input type="number" name="idleGreenSecs" min="5" max="86400" required />
       </label>
       <label><span data-i18n="set.blocked">超时判定（秒）——等待响应超过该时长视为 API 超时</span>
-        <input type="number" name="blockedAfterSecs" min="60" max="86400" />
+        <input type="number" name="blockedAfterSecs" min="10" max="86400" required />
       </label>
       <label class="check-row"><input type="checkbox" name="autoContinue" />
         <span data-i18n="set.auto">自动继续</span></label>
       <label class="check-row"><input type="checkbox" name="closeToTray" />
         <span data-i18n="set.tray">关闭窗口时最小化到托盘（后台继续监控）</span></label>
       <label class="check-row"><input type="checkbox" name="showGlmUsage" />
-        <span data-i18n="set.usage">显示 GLM 套餐用量（顶栏）</span></label>
+        <span data-i18n="set.usage">显示 GLM 套餐用量（底部状态栏）</span></label>
       <label><span data-i18n="set.wait">等待时长（小时）——红灯后多久自动继续</span>
-        <input type="number" name="waitHours" min="0" max="24" step="0.5" />
+        <input type="number" name="waitHours" min="0" max="168" step="0.5" required />
       </label>
       <label><span data-i18n="set.keys">继续按键（tmux 键名，空格分隔）</span>
         <input type="text" name="resumeKeys" placeholder="Enter" />
       </label>
       <label><span data-i18n="set.max">最大自动尝试次数</span>
-        <input type="number" name="maxSends" min="1" max="10" />
+        <input type="number" name="maxSends" min="1" max="100" required />
       </label>
       <label><span data-i18n="set.retry">重试间隔（分钟）</span>
-        <input type="number" name="retryIntervalMin" min="1" max="120" />
+        <input type="number" name="retryIntervalMin" min="1" max="1440" required />
       </label>
       <label><span data-i18n="set.distro">WSL 发行版（留空 = 默认）</span>
         <input type="text" name="wslDistro" placeholder="Ubuntu" />

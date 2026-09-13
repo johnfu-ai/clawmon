@@ -95,16 +95,19 @@ function render(sessions, warning) {
       s.tmuxLabel ? "" : `<span class="no-control">${t("monitor.only")}</span>`,
     ].filter(Boolean).join("");
 
+    // the backend computes why the countdown row shows what it shows; this
+    // is a dumb switch on the tag, never a re-derivation from other fields
     let countdown = "";
-    if (state === "red") {
-      if (s.controllable && s.remainingSec != null) {
+    if (s.countdown) {
+      const c = s.countdown;
+      if (c.kind === "waiting") {
         // the ticker below keeps this one counting between polls
         countdown = `<span class="countdown" data-countdown="${s.pid}">${
-          countdownText(s, s.remainingSec)}</span>`;
-      } else if (!s.controllable) {
+          countdownText(s, c.remainingSec)}</span>`;
+      } else if (c.kind === "no_tmux") {
         countdown = `<span class="countdown sent">${t("cd.notmux")}</span>`;
-      } else if (s.sends > 0) {
-        countdown = `<span class="countdown sent">${t("cd.limit", { n: s.sends })}</span>`;
+      } else if (c.kind === "capped") {
+        countdown = `<span class="countdown sent">${t("cd.limit", { n: c.sends })}</span>`;
       } else {
         countdown = `<span class="countdown sent">${t("cd.disabled")}</span>`;
       }
@@ -120,7 +123,7 @@ function render(sessions, warning) {
         <div class="session-top">
           ${light}
           <span class="session-name" title="${escapeHtml(s.cwd)}">${escapeHtml(s.project)}</span>
-          <span class="session-state ${state}">${escapeHtml(stateLabel(s.label))}</span>
+          <span class="session-state ${state}">${escapeHtml(t("reason." + s.reason))}</span>
         </div>
         <div class="session-meta">${meta}</div>
         ${preview}
@@ -169,8 +172,8 @@ function fmtReset(ms) {
 
 function usageTip(key, u) {
   return t(key, {
-    cur: u.currentValue.toLocaleString(),
-    total: u.usage.toLocaleString(),
+    cur: u.consumed.toLocaleString(),
+    total: u.total.toLocaleString(),
     time: fmtReset(u.nextResetMs),
   });
 }
@@ -181,7 +184,7 @@ function usageTip(key, u) {
 function renderUsage(u) {
   lastUsage = u;
   const chip = $("usage-chip");
-  if (!u || (!u.fiveHour && !u.monthly)) {
+  if (!u || (!u.fiveHour && !u.weekly)) {
     chip.classList.add("hidden");
     chip.textContent = "";
     chip.removeAttribute("title");
@@ -225,9 +228,9 @@ function countdownText(session, remainingSec) {
 function tickCountdowns() {
   const elapsed = Math.floor((Date.now() - snapshotAt) / 1000);
   for (const s of snapshot.sessions) {
-    if (s.state !== "red" || !s.controllable || s.remainingSec == null) continue;
+    if (!s.countdown || s.countdown.kind !== "waiting") continue;
     const el = document.querySelector(`[data-countdown="${s.pid}"]`);
-    if (el) el.textContent = countdownText(s, s.remainingSec - elapsed);
+    if (el) el.textContent = countdownText(s, s.countdown.remainingSec - elapsed);
   }
 }
 
@@ -291,26 +294,23 @@ function closeSettings() {
 async function saveSettings(ev) {
   ev.preventDefault();
   const f = $("settings-form");
-  const num = (v, dflt) => {
-    const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? n : dflt;
-  };
-  // unlike the others, 0 hours is a valid choice ("resume as soon as it turns
-  // red"), so it must not fall back to the default
-  const hours = Number(f.waitHours.value);
+  // Every number input is `required` (and HTML-validated), so no empty or
+  // invalid value reaches this code. Defaults and bounds are owned by
+  // Settings::sanitize on the Rust side — this half only converts display
+  // units (hours/minutes → seconds) and forwards raw values.
   const s = {
     language: f.language.value === "en" ? "en" : "zh",
-    pollIntervalSecs: num(f.pollIntervalSecs.value, 5),
-    idleGreenSecs: num(f.idleGreenSecs.value, 120),
-    blockedAfterSecs: num(f.blockedAfterSecs.value, 300),
+    pollIntervalSecs: Number(f.pollIntervalSecs.value),
+    idleGreenSecs: Number(f.idleGreenSecs.value),
+    blockedAfterSecs: Number(f.blockedAfterSecs.value),
     autoContinue: f.autoContinue.checked,
     closeToTray: f.closeToTray.checked,
     showGlmUsage: f.showGlmUsage.checked,
-    waitSecs: Math.round(
-      (Number.isFinite(hours) && hours >= 0 ? Math.min(hours, 24) : 5) * 3600),
-    resumeKeys: f.resumeKeys.value.trim() || "Enter",
-    maxSends: num(f.maxSends.value, 3),
-    retryIntervalSecs: num(f.retryIntervalMin.value, 10) * 60,
+    // 0 stays 0: "resume as soon as it turns red" is a valid choice
+    waitSecs: Math.round(Number(f.waitHours.value) * 3600),
+    resumeKeys: f.resumeKeys.value.trim(),
+    maxSends: Number(f.maxSends.value),
+    retryIntervalSecs: Number(f.retryIntervalMin.value) * 60,
     wslDistro: f.wslDistro.value.trim(),
     notifyRed: f.notifyRed.checked,
     notifyContinue: f.notifyContinue.checked,
@@ -364,6 +364,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   setInterval(tickCountdowns, 1000);
   setInterval(() => {
     const d = new Date();
-    $("foot-clock").textContent = d.toLocaleTimeString("zh-CN", { hour12: false });
+    // en-GB keeps the 24-hour clock the footer is sized for
+    $("foot-clock").textContent =
+      d.toLocaleTimeString(LANG === "en" ? "en-GB" : "zh-CN", { hour12: false });
   }, 1000);
 });

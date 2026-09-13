@@ -48,6 +48,17 @@ const T = {
 
   /* session rows */
   "sum": ["● {g} 运行 · ● {y} 等待 · ● {r} 超时", "● {g} running · ● {y} waiting · ● {r} stuck"],
+  /* the engine's classification tags (SessionView.reason, snake_case) —
+     keying on the tag keeps the vocabulary owned by the state machine that
+     produces it; a forgotten entry shows the raw key instead of the wrong
+     language */
+  "reason.active": ["运行中", "Running"],
+  "reason.no_transcript": ["未找到记录", "No transcript"],
+  "reason.transcript_stale": ["记录未就绪", "Transcript not ready"],
+  "reason.tool_running": ["工具运行中", "Tool running"],
+  "reason.waiting_input": ["等待输入", "Waiting for input"],
+  "reason.waiting_response": ["等待响应", "Waiting for response"],
+  "reason.response_timed_out": ["疑似 API 超时", "Likely API timeout"],
   "idle.sec": ["{n} 秒", "{n}s"],
   "idle.min": ["{n} 分钟", "{n} min"],
   "idle.hour": ["{h} 小时 {m} 分", "{h} h {m} min"],
@@ -76,17 +87,13 @@ const T = {
 
   /* toasts */
   "toast.saved": ["设置已保存", "Settings saved"],
-};
 
-/* the engine's status labels arrive in Chinese; translate for display only */
-const LABEL_EN = {
-  "运行中": "Running",
-  "等待输入": "Waiting for input",
-  "工具运行中": "Tool running",
-  "等待响应": "Waiting for response",
-  "疑似 API 超时": "Likely API timeout",
-  "未找到记录": "No transcript",
-  "记录未就绪": "Transcript not ready",
+  /* pet (pet.js loads this same table) */
+  "pet.green": ["一切正常", "All good"],
+  "pet.yellow": ["有会话在等待", "Sessions waiting"],
+  "pet.red": ["有会话疑似卡死", "Session may be stuck"],
+  "pet.off": ["WSL 连接异常", "WSL unreachable"],
+  "pet.click": ["点击打开主窗口", "click to open the main window"],
 };
 
 function t(key, vars) {
@@ -94,10 +101,6 @@ function t(key, vars) {
   let s = entry ? entry[LANG === "en" ? 1 : 0] : key;
   if (vars) for (const k in vars) s = s.replaceAll("{" + k + "}", vars[k]);
   return s;
-}
-
-function stateLabel(zhLabel) {
-  return LANG === "en" ? (LABEL_EN[zhLabel] || zhLabel) : zhLabel;
 }
 
 function applyI18n(root = document) {

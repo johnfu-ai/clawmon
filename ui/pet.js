@@ -1,4 +1,6 @@
-/* clawmon desktop pet — click to bring the main window back, drag to move */
+/* clawmon desktop pet — click to bring the main window back, drag to move.
+   Loads i18n.js (see pet.html) so the pet renders through the same copy
+   table as the main window instead of a private one. */
 const { invoke } = window.__TAURI__.core;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
@@ -6,15 +8,13 @@ const { listen } = window.__TAURI__.event;
 const root = document.getElementById("pet");
 const badge = document.getElementById("badge");
 
-const STATE_LABEL = {
-  green: ["一切正常", "All good"],
-  yellow: ["有会话在等待", "Sessions waiting"],
-  red: ["有会话疑似卡死", "Session may be stuck"],
-  off: ["WSL 连接异常", "WSL unreachable"],
+const STATE_KEY = {
+  green: "pet.green",
+  yellow: "pet.yellow",
+  red: "pet.red",
+  off: "pet.off",
 };
-const CLICK_HINT = ["点击打开主窗口", "click to open the main window"];
 
-let lang = "zh";
 let lastStatus = { red: 0, yellow: 0, green: 0 };
 
 function applyStatus(s) {
@@ -31,8 +31,8 @@ function applyStatus(s) {
     count = s.yellow;
   }
   root.dataset.state = state;
-  const i = lang === "en" ? 1 : 0;
-  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🟢${s.green}\n${STATE_LABEL[state][i]}（${CLICK_HINT[i]}）`;
+  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🟢${s.green}\n${
+    t(STATE_KEY[state])}（${t("pet.click")}）`;
 
   badge.classList.toggle("hidden", count === 0);
   badge.classList.toggle("yellow", state === "yellow");
@@ -44,12 +44,11 @@ listen("status", (e) => applyStatus(e.payload));
 
 /* follow language changes made in the main window's settings */
 invoke("get_settings").then((s) => {
-  const was = lang;
-  lang = s.language === "en" ? "en" : "zh";
-  if (was !== lang) applyStatus(lastStatus);
+  setLang(s.language);
+  applyStatus(lastStatus);
 }).catch(() => {});
 listen("settings", (e) => {
-  lang = e.payload.language === "en" ? "en" : "zh";
+  setLang(e.payload.language);
   applyStatus(lastStatus);
 });
 
