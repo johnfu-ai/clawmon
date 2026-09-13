@@ -472,4 +472,162 @@ print(json.dumps({str(k): os.path.basename(v) if v else None
             "the old decoy must stay unclaimed"
         );
     }
+
+    /// Regression: child claude processes are not sessions. Plugins and
+    /// agent SDKs spawn claude binaries that descend from the real session
+    /// with a pipe on stdin — one terminal used to show up as many rows.
+    /// Spawns three fake processes and drives the real `collect()`:
+    /// a pts-stdin one (kept), a pipe-stdin one (dropped), and a
+    /// claude-child-of-claude (dropped even though it inherits the pts).
+    /// (Linux only; needs a real /proc and `script` for the pty.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn child_and_pipe_stdin_claude_processes_are_not_sessions() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, subprocess, sys, time
+
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# The fixtures must not be descendants of whatever runs this driver — on a
+# developer box that is often a claude process itself, whose ancestry would
+# (correctly) filter them. `setsid --fork` re-parents each fixture to init
+# and the shim records its own pid, which survives the exec into "claude".
+def detached(sh_body, stdin=subprocess.DEVNULL):
+    pf = os.path.join(work, "pid%d" % detached.n)
+    detached.n += 1
+    # bash, not sh: the fixtures rely on `exec -a`, which dash's exec lacks
+    subprocess.Popen(
+        ["setsid", "--fork", "bash", "-c", "echo $$ > %s; %s" % (pf, sh_body)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=stdin)
+    return pf
+detached.n = 0
+
+def wait_pid(pf):
+    for _ in range(40):
+        try:
+            with open(pf) as f:
+                return int(f.read().strip())
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError("pidfile never appeared: %s" % pf)
+
+# a real-looking session: claude with a terminal on stdin
+kept_script = detached(
+    'exec script -qec "exec -a claude sleep 60" /dev/null')
+# same argv[0], but stdin is a pipe handed over by the spawner
+piped_pf = detached("exec -a claude sleep 60", stdin=subprocess.PIPE)
+# a claude descending from another claude: the middle bash forks the inner
+# one and stays alive (`& wait`) — a plain `bash -c "exec …"` would just
+# replace itself and the pair would never exist as two processes
+nested = ('exec script -qec "exec -a claude bash -c '
+          '\'exec -a claude sleep 60 & wait\'" /dev/null')
+nested_script = detached(nested)
+
+time.sleep(0.5)
+scan = mod.collect()
+
+def children(pid):
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open("/proc/%s/status" % d) as f:
+                for line in f:
+                    if line.startswith("PPid:"):
+                        if int(line.split()[1]) == pid:
+                            out.append(int(d))
+                        break
+        except OSError:
+            pass
+    return out
+
+kept_pid = wait_pid(kept_script)
+nested_pid = wait_pid(nested_script)
+piped_pid = wait_pid(piped_pf)
+kept_claude = children(kept_pid)[:1]      # `script` wraps the claude
+outer = children(nested_pid)[:1]          # the outer claude
+inner = children(outer[0])[:1] if outer else []  # the inner claude
+pids = {s["pid"] for s in scan["sessions"]}
+
+alive = lambda p: os.path.exists("/proc/%d" % p)
+# capture before the cleanup kills, so "not listed" is never vacuous
+was_alive = [alive(p) for p in [piped_pid] + kept_claude + outer + inner]
+
+for p in [kept_pid, nested_pid, piped_pid] + kept_claude + outer + inner:
+    try:
+        os.kill(p, 9)
+    except OSError:
+        pass
+
+print(json.dumps({
+    "layout": {"kept": kept_claude, "outer": outer, "inner": inner},
+    "alive": was_alive,
+    "kept": kept_claude[0] in pids if kept_claude else None,
+    "piped": piped_pid in pids,
+    "outer_claude": outer[0] in pids if outer else None,
+    "inner_claude": inner[0] in pids if inner else None,
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed its verdict");
+        let layout = &result["layout"];
+        for (key, why) in [
+            ("kept", "pts fixture"),
+            ("outer", "nested outer"),
+            ("inner", "nested inner"),
+        ] {
+            assert_eq!(
+                layout[key].as_array().map(|a| a.len()),
+                Some(1),
+                "the {why} fixture did not spawn: {result}"
+            );
+        }
+        assert!(
+            result["alive"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|v| v == &serde_json::Value::Bool(true)),
+            "a fixture died before the scan — verdicts would be vacuous: {result}"
+        );
+        assert_eq!(result["kept"], true, "a pts-stdin claude must be listed");
+        assert_eq!(
+            result["piped"], false,
+            "a pipe-stdin claude (agent child) must not be listed"
+        );
+        assert_eq!(
+            result["inner_claude"], false,
+            "a claude descending from another claude must not be listed \
+             even with a pts on stdin"
+        );
+        assert_eq!(
+            result["outer_claude"], true,
+            "the outer claude of the pair is a normal session"
+        );
+    }
 }

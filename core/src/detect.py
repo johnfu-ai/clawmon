@@ -553,6 +553,22 @@ def collect():
             "start": proc_start_epoch(pid),
         })
 
+    # pass 1b: keep only interactive sessions. Plugins and agent SDKs spawn
+    # extra claude processes — e.g. a hook running a security review on every
+    # tool call, or an SDK's bundled binary. They are children of an existing
+    # session, not sessions of their own, and listing them made one terminal
+    # show up as many. Two independent signals, either conclusive: the
+    # process descends from another claude process, or its stdin is not a
+    # terminal (a pipe handed over by the spawner) so there is nothing to
+    # monitor or auto-continue. The second also catches agents whose parent
+    # already exited and got reparented.
+    matched = set(p["pid"] for p in procs)
+    procs = [
+        p for p in procs
+        if not (matched & ancestors(p["pid"]))
+        and p["tty"].startswith(("/dev/pts/", "/dev/tty", "/dev/console"))
+    ]
+
     # pass 2: one transcript per process (concurrent sessions don't share)
     transcripts = assign_transcripts(procs)
 
