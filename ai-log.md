@@ -91,3 +91,21 @@ Finish the goal end to end: push the commits, let the real Windows CI validate t
 
 ### Outcome
 v0.2.0 published: https://github.com/johnfu-ai/clawmon/releases/tag/v0.2.0. main == v0.2.0 == af615b4. All nine goal items complete (auto-update built then removed at the user's request). Remaining, user-side only: download and run the exe on a real Windows desktop to see toasts / pet click-through / sound in action.
+
+## [2026-09-13 17:02] Build latest exe in the user's Windows clawmon-build dir
+
+### User prompt
+"你是否可以把最新的代码考入这个位置C:\Users\JohnFoo\clawmon-build, 并编译出最新的exe文件？" (also: why did it build in that directory earlier)
+
+### Goal interpretation
+Copy the latest (v0.2.0) source into the user's existing Windows build folder and produce an up-to-date clawmon.exe there using the Windows-native toolchain.
+
+### Actions taken
+- Explained the path: clawmon-build is the folder the user compiled in themselves on Sep 9 (v0.1.0); Cargo always outputs to target\ under the workspace root.
+- Verified /mnt/c access and WSL interop; found the Windows toolchain (cargo 1.98.1 + tauri CLI) already installed for user JohnFoo.
+- rsync-synced the repo into /mnt/c/Users/JohnFoo/clawmon-build (excluding .git/ and target/ to keep the incremental cache; excluding ai-log.md), confirmed version 0.2.0 landed.
+- Ran the Windows-native build via interop: cargo.exe build --release from the mirrored dir; finished in 3m58s reusing the Sep 9 dep cache. Skipped installer bundling (exe only, as requested).
+- Verified the artifact: target\release\clawmon.exe, 9.0 MB, FileVersion/ProductVersion 0.2.0.
+
+### Outcome
+Fresh v0.2.0 clawmon.exe ready at C:\Users\JohnFoo\clawmon-build\target\release\clawmon.exe for the user to run and verify toasts / pet click-through / sound on the real Windows desktop.
