@@ -473,6 +473,125 @@ print(json.dumps({str(k): os.path.basename(v) if v else None
         );
     }
 
+    /// Regression: `/clear` retires the transcript a process was born
+    /// with and starts a newer one in the same project dir — the birth
+    /// match alone kept pairing the process with the closed file forever
+    /// (idle time frozen at the last pre-clear entry, so a hard-working
+    /// session showed "waiting", then "possible API timeout"). Drives the
+    /// real `assign_transcripts`: a cleared process follows the new file,
+    /// an idle one keeps its own, and a file still being written after a
+    /// stranger was born is not a clear (Linux only; needs a real
+    /// python3).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pairing_follows_clear_not_idle() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+
+detect_path, root = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+projects = os.path.join(root, "projects")
+mod.CLAUDE_DIR = projects
+
+ts = mod.parse_ts
+closeout = {"type": "cost-state", "sessionId": "x"}
+
+def mk(slug, name, first_iso, close, mtime):
+    d = os.path.join(projects, slug)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, name)
+    with open(p, "w") as f:
+        f.write(json.dumps({"type": "user", "timestamp": first_iso,
+                            "sessionId": name[:-6]}) + "\n")
+        if close:
+            f.write(json.dumps(close) + "\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+# the bug: the file born with the process ends with the untimestamped
+# close-out record /clear appends, and a newer file exists
+clr = "-tmp-clr"
+old0 = mk(clr, "old00000-0000-0000-0000-000000000001.jsonl",
+          "2026-09-13T13:00:00Z", closeout, ts("2026-09-13T13:54:00Z"))
+new0 = mk(clr, "new00000-0000-0000-0000-000000000002.jsonl",
+          "2026-09-13T13:54:00Z", None, ts("2026-09-13T14:04:00Z"))
+
+# idle at the prompt: the last entry is timestamped, so a newer
+# unclaimed file (a dead neighbour's leftover) must not be adopted
+idle = "-tmp-idle"
+keep0 = mk(idle, "keep0000-0000-0000-0000-000000000003.jsonl",
+           "2026-09-13T12:00:00Z", None, ts("2026-09-13T12:56:00Z"))
+mk(idle, "leftovr0-0000-0000-0000-000000000004.jsonl",
+   "2026-09-13T13:30:00Z", None, ts("2026-09-13T13:40:00Z"))
+
+# close-out marker, but the file was still written long after the newer
+# file was born — not a clear of this process
+hot = "-tmp-hot"
+work0 = mk(hot, "work0000-0000-0000-0000-000000000005.jsonl",
+           "2026-09-13T13:00:00Z", closeout, ts("2026-09-13T14:04:00Z"))
+mk(hot, "late0000-0000-0000-0000-000000000006.jsonl",
+   "2026-09-13T13:50:00Z", None, ts("2026-09-13T14:04:00Z"))
+
+procs = [
+    {"pid": 201, "cmd": ["claude"], "cwd": "/tmp/clr",
+     "tty": "", "tmux": None, "start": ts("2026-09-13T13:00:05Z")},
+    {"pid": 202, "cmd": ["claude"], "cwd": "/tmp/idle",
+     "tty": "", "tmux": None, "start": ts("2026-09-13T12:00:05Z")},
+    {"pid": 203, "cmd": ["claude"], "cwd": "/tmp/hot",
+     "tty": "", "tmux": None, "start": ts("2026-09-13T13:00:05Z")},
+]
+mapping = mod.assign_transcripts(procs)
+print(json.dumps({str(k): os.path.basename(v) if v else None
+                  for k, v in mapping.items()}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mapping: std::collections::HashMap<String, Option<String>> =
+            serde_json::from_slice(&out.stdout).expect("driver printed the mapping");
+        assert_eq!(
+            mapping.get("201").unwrap().as_deref(),
+            Some("new00000-0000-0000-0000-000000000002.jsonl"),
+            "a cleared process must follow the post-clear transcript"
+        );
+        assert_eq!(
+            mapping.get("202").unwrap().as_deref(),
+            Some("keep0000-0000-0000-0000-000000000003.jsonl"),
+            "an idle session keeps its transcript"
+        );
+        assert_eq!(
+            mapping.get("203").unwrap().as_deref(),
+            Some("work0000-0000-0000-0000-000000000005.jsonl"),
+            "a file still being written after the stranger was born is not retired"
+        );
+        assert!(
+            !mapping
+                .values()
+                .any(|v| v.as_deref() == Some("old00000-0000-0000-0000-000000000001.jsonl")),
+            "the retired transcript must stay burned"
+        );
+    }
+
     /// Regression: child claude processes are not sessions. Plugins and
     /// agent SDKs spawn claude binaries that descend from the real session
     /// with a pipe on stdin — one terminal used to show up as many rows.

@@ -279,6 +279,42 @@ def assign_transcripts(procs):
             free.remove(pick)
             result[p["pid"]] = pick
 
+        # A process outlives its transcript when the user /clears: the
+        # retired file keeps the birth-time evidence that matched it, so
+        # the pass above would pair the process with a closed session
+        # forever — its idle time frozen at the last pre-clear entry. Hand
+        # such processes over to a newer-born unclaimed file, but only
+        # when the retired file actually closed out (trailing untimestamped
+        # marker) and went quiet before the new file was born. Those two
+        # conditions are what keep an idle session from adopting a dead
+        # neighbour's leftover transcript.
+        for p in group:
+            pick = result.get(p["pid"])
+            if not pick:
+                continue
+            pick_first = first_ts_epoch(pick)
+            if pick_first is None or not final_marker_tail(pick):
+                continue
+            try:
+                pick_quiet = os.path.getmtime(pick)
+            except OSError:
+                continue
+            takeover = None
+            for f in free:
+                f_first = first_ts_epoch(f)
+                if f_first is None or f_first <= pick_first:
+                    continue
+                if pick_quiet > f_first + 60:
+                    continue  # the pick was still live after f was born
+                if takeover is None or f_first > first_ts_epoch(takeover):
+                    takeover = f
+            if takeover is not None:
+                result[p["pid"]] = takeover
+                claimed.add(takeover)
+                free.remove(takeover)
+                # the retired file stays claimed on purpose: a closed
+                # session must not become a candidate for other processes
+
     # last resort: cwd tail-match scan for processes with nothing so far
     cutoff = 7 * 86400
     recent = [(m, f) for m, f in scan_transcripts() if m > cutoff][:60]
@@ -351,6 +387,29 @@ def read_tail(path, window=TAIL_WINDOW, limit=TAIL_WINDOW_MAX):
         if window >= limit:
             return text  # one line longer than we are willing to buffer
         window *= 2
+
+
+def final_marker_tail(path):
+    """True when the transcript ends with a session close-out record.
+
+    /clear (and a clean exit) retire a transcript by appending one last
+    untimestamped meta record (`cost-state`, `atis-latch`, ...); every
+    in-session entry carries a timestamp, so a session still open — even
+    one idle at the prompt — ends on a timestamped one. This is the
+    fingerprint that tells "cleared" apart from "merely idle".
+    """
+    try:
+        tail = read_tail(path)
+    except OSError:
+        return False
+    lines = [l for l in tail.split("\n") if l.strip()]
+    if not lines:
+        return False
+    try:
+        d = json.loads(lines[-1])
+    except Exception:
+        return False  # mid-write or non-JSON trailer: not a close-out
+    return isinstance(d, dict) and "type" in d and "timestamp" not in d
 
 
 def last_entry(path):
