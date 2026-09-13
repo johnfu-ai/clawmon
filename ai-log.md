@@ -56,3 +56,20 @@ Explain why the updater signing key exists, commit the finished v0.2.0 work, and
 
 ### Outcome
 v0.2.0 committed locally on main. Pending: push, optional tag v0.2.0 + signing-key secrets for auto-update artifacts, and a real-Windows runtime test of toasts/click-through/beep.
+
+## [2026-09-13 16:25] Remove auto-update; answer build-history question
+
+### User prompt
+"1.取消更新 2.之前是怎样编译的？在github上？还是之前有权限在windows上编译？我一开始的时候，看到过windows上生成exe文件"
+
+### Goal interpretation
+Remove the auto-update feature entirely (user decided against it after hearing why the signing key exists), and explain how previous Windows builds were produced given this session only has WSL access.
+
+### Actions taken
+- Removed the updater end to end: tauri-plugin-updater/process deps, plugin registrations, check_update/install_update commands, startup check, auto_update setting, the 关于 UI group with its buttons and i18n keys, updater/process capabilities, and the release-workflow signing + latest.json steps (workflow restored to plain build + attach). README updated accordingly. ~/.tauri/clawmon.key left on disk outside the repo (safe to delete).
+- Verified: fmt, clippy -D warnings, 32 unit tests, py_compile, node --check on all UI JS, and the WSL→Windows cross-check.
+- Answered the build-history question from git/gh records: v0.1.0 was built on GitHub Actions windows-latest runners, triggered by pushing the v0.1.0 tag on 2026-09-09 (three runs: one failure on npm tauri-cli, then success with cargo-installed tauri-cli, then an artifact-path fix that attached clawmon.exe / setup.exe / msi). No local Windows build was ever involved.
+- Committed as `ecd836c` (13 files, +25/−644).
+
+### Outcome
+App now has notifications, resident detector, exit/turn-end detection, i18n, sound, and pet click-through — without auto-update. Releases remain tag-driven on GitHub's Windows runners. Nothing pushed yet.
