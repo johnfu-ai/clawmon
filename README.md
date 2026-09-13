@@ -114,8 +114,10 @@ scripts/build-local.sh
 
 1. 启动小程序，保持窗口开着（可以最小化、关到系统托盘，后台仍会
    轮询 + 自动继续；托盘图标悬停可见红黄绿灯统计）。
-2. 每个 claude 进程显示为一行：项目名、灯色、状态、空闲时长、最后输出
-   预览、tmux 位置。
+2. 每个 claude 进程显示为一行：项目名、灯色、状态、空闲时长、本会话
+   token 用量（`in x · cache x · out x · N req`，悬停有说明；由
+   transcript 按 message id 去重累计，含子代理）、最后输出预览、
+   tmux 位置。
 3. 红灯会闪烁并显示「xx:xx:xx 后自动继续」倒计时；也可以点
    **「立即继续」** 手动发送按键。
 4. **桌面宠物**：一只 Claude Code 螃蟹（Clawd）风格的珊瑚橘小螃蟹
@@ -125,7 +127,13 @@ scripts/build-local.sh
    即可弹出主窗口（宠物本身常驻不消失）。最小化主窗口只是把它藏起来，
    监控面完全交给小螃蟹。窗口四角的透明区域点击可穿透，只有螃蟹本体
    拦截鼠标。
-5. ⚙ 打开设置（界面与通知支持中文 / English 切换）：
+5. **GLM 套餐用量**（底部状态栏）：从 `~/.claude/settings.json` 读取
+   `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`（令牌只在 WSL 内部
+   使用，不经过 Windows 侧），每 5 分钟查询一次套餐配额接口，显示
+   5 小时额度与周额度「5h xx% · 7d xx%」（悬停可见积分明细、重置
+   时间与套餐等级；70% 变黄、90% 变红）。查询失败只保留上次结果，
+   不影响监控本身；非 GLM 端点会自动隐藏。可在设置里关闭。
+6. ⚙ 打开设置（界面与通知支持中文 / English 切换）：
 
 | 设置项 | 默认 | 说明 |
 |--------|------|------|
@@ -138,6 +146,7 @@ scripts/build-local.sh
 | 最大尝试次数 | 3 | 每次卡死周期的自动发送上限 |
 | 重试间隔 | 10 分钟 | 发送失败/无效后的重试节奏 |
 | WSL 发行版 | 空 | 留空用默认发行版，可填 `Ubuntu` 等 |
+| GLM 套餐用量 | 开 | 底部状态栏显示 5 小时 / 周配额百分比（仅 GLM Coding Plan 有意义） |
 | 关闭到托盘 | 开 | 关闭窗口时最小化到系统托盘继续监控；托盘左键点击恢复窗口，右键菜单可退出 |
 | 语言 | 中文 | 界面与通知语言：中文 / English |
 | 通知 ×5 | 见上表 | 变红 / 自动继续 / 恢复 / 回合结束 / 退出，逐项开关 |
@@ -150,10 +159,12 @@ core/                 纯逻辑 crate（不依赖 Tauri，可单独测试）
   src/detector.rs      WSL 检测调用（常驻进程 + 一次性降级）+ JSON 解析
   src/engine.rs        状态机（红黄灯判定、倒计时、自动继续调度、事件边沿检测）
   src/settings.rs      设置持久化 + 取值校验
+  src/usage.rs         GLM 套餐配额查询调用 + JSON 解析
   src/wsl.rs           wsl.exe 调用封装（Windows）/ 直接调用（Linux 测试）+ 常驻子进程
 src-tauri/
   src/detect.py        内嵌的 WSL 侧检测脚本（一次性 / --serve 常驻两种模式）
-  src/lib.rs           轮询线程 + 通知 + Tauri 命令胶水层
+  src/usage.py         内嵌的 WSL 侧配额查询脚本（读 ~/.claude/settings.json，令牌不出 WSL）
+  src/lib.rs           轮询线程 + 用量线程 + 通知 + Tauri 命令胶水层
 scripts/
   build-local.sh       WSL 驱动本机 Windows 工具链出 exe（见「构建」一节）
   win-clippy.sh        从 WSL 跑与 CI windows 作业一致的 clippy

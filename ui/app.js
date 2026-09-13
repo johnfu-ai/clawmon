@@ -29,6 +29,12 @@ function fmtCountdown(sec) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return Math.round(n / 1e3) + "K";
+  return String(n);
+}
+
 let toastTimer = null;
 function toast(msg, isError = false) {
   let el = document.querySelector(".toast");
@@ -79,6 +85,13 @@ function render(sessions, warning) {
       s.tmuxLabel ? `<span class="tmux">tmux ${escapeHtml(s.tmuxLabel)}</span>`
                   : `<span class="tmux">${t("no.tmux")}</span>`,
       `<span>${t("meta.idle", { s: fmtIdle(s.idleSec) })}</span>`,
+      s.usage ? `<span class="tokens" title="${escapeHtml(t("meta.usage.tip"))}">${
+          t("meta.usage", {
+            i: fmtTokens(s.usage.input),
+            c: fmtTokens(s.usage.cacheRead + s.usage.cacheCreation),
+            o: fmtTokens(s.usage.output),
+            n: s.usage.requests,
+          })}</span>` : "",
       s.tmuxLabel ? "" : `<span class="no-control">${t("monitor.only")}</span>`,
     ].filter(Boolean).join("");
 
@@ -129,6 +142,70 @@ function render(sessions, warning) {
 }
 
 const LIGHTS = ["green", "yellow", "red"];
+
+/* ---------- GLM plan usage chip ---------- */
+
+let lastUsage = null;
+
+function usageClass(p) {
+  if (p >= 90) return "u-red";
+  if (p >= 70) return "u-amber";
+  return "u-green";
+}
+
+function fmtReset(ms) {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  // a window resetting on another day needs its date — "18:19" alone would
+  // read as tonight, and the weekly quota can be a week out
+  return sameDay ? hhmm : `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
+}
+
+function usageTip(key, u) {
+  return t(key, {
+    cur: u.currentValue.toLocaleString(),
+    total: u.usage.toLocaleString(),
+    time: fmtReset(u.nextResetMs),
+  });
+}
+
+/** Paint the header chip from the backend's latest quota snapshot. The
+    backend pushes a fresh one every few minutes; between pushes this just
+    re-renders (e.g. on a language switch, via lastUsage). */
+function renderUsage(u) {
+  lastUsage = u;
+  const chip = $("usage-chip");
+  if (!u || (!u.fiveHour && !u.monthly)) {
+    chip.classList.add("hidden");
+    chip.textContent = "";
+    chip.removeAttribute("title");
+    return;
+  }
+  const parts = [
+    u.fiveHour
+      ? `<span class="${usageClass(u.fiveHour.percentage)}">${
+          t("usage.5h", { p: Math.round(u.fiveHour.percentage) })}</span>`
+      : "",
+    u.weekly
+      ? `<span class="${usageClass(u.weekly.percentage)}">${
+          t("usage.wk", { p: Math.round(u.weekly.percentage) })}</span>`
+      : "",
+  ].filter(Boolean);
+  chip.innerHTML = parts.join('<span class="u-sep">·</span>');
+  const tips = [
+    u.fiveHour ? usageTip("usage.tip.5h", u.fiveHour) : "",
+    u.weekly ? usageTip("usage.tip.wk", u.weekly) : "",
+    u.level ? t("usage.level", { level: u.level }) : "",
+  ].filter(Boolean);
+  chip.title = tips.join("\n");
+  chip.classList.remove("hidden");
+}
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({
@@ -184,6 +261,7 @@ function loadSettingsForm(s) {
   f.blockedAfterSecs.value = s.blockedAfterSecs;
   f.autoContinue.checked = s.autoContinue;
   f.closeToTray.checked = s.closeToTray;
+  f.showGlmUsage.checked = s.showGlmUsage;
   f.waitHours.value = (s.waitSecs / 3600).toFixed(1);
   f.resumeKeys.value = s.resumeKeys;
   f.maxSends.value = s.maxSends;
@@ -227,6 +305,7 @@ async function saveSettings(ev) {
     blockedAfterSecs: num(f.blockedAfterSecs.value, 300),
     autoContinue: f.autoContinue.checked,
     closeToTray: f.closeToTray.checked,
+    showGlmUsage: f.showGlmUsage.checked,
     waitSecs: Math.round(
       (Number.isFinite(hours) && hours >= 0 ? Math.min(hours, 24) : 5) * 3600),
     resumeKeys: f.resumeKeys.value.trim() || "Enter",
@@ -261,10 +340,17 @@ window.addEventListener("DOMContentLoaded", async () => {
   try {
     setLang((await invoke("get_settings")).language);
   } catch (_) { /* zh stays */ }
-  listen("settings", (e) => setLang(e.payload.language));
+  // a language switch also re-renders the usage chip's tooltip
+  listen("settings", (e) => {
+    setLang(e.payload.language);
+    renderUsage(lastUsage);
+  });
 
   // every poll the backend makes ends up here
   listen("sessions", (event) => render(event.payload.sessions, event.payload.warning));
+  // the usage loop pushes a fresh quota snapshot every few minutes
+  listen("usage", (event) => renderUsage(event.payload));
+  invoke("get_usage").then(renderUsage).catch(() => {});
   await refresh();
 
   // WebView2 stops running this page's scripts while the window is hidden

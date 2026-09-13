@@ -50,6 +50,8 @@
         <span data-i18n="set.auto">自动继续</span></label>
       <label class="check-row"><input type="checkbox" name="closeToTray" />
         <span data-i18n="set.tray">关闭窗口时最小化到托盘（后台继续监控）</span></label>
+      <label class="check-row"><input type="checkbox" name="showGlmUsage" />
+        <span data-i18n="set.usage">显示 GLM 套餐用量（顶栏）</span></label>
       <label><span data-i18n="set.wait">等待时长（小时）——红灯后多久自动继续</span>
         <input type="number" name="waitHours" min="0" max="24" step="0.5" />
       </label>
@@ -90,6 +92,7 @@
 
   <footer>
     <span id="foot-status">连接 WSL…</span>
+    <span id="usage-chip" class="usage-chip hidden"></span>
     <span id="foot-clock"></span>
   </footer>
 
