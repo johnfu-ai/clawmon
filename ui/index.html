@@ -10,10 +10,10 @@
   <header>
     <div class="brand">
       <span class="logo">◆</span>
-      <span>Claude WSL 监控</span>
+      <span data-i18n="app.title">Claude WSL 监控</span>
       <span id="summary" class="summary"></span>
     </div>
-    <button id="btn-settings" title="设置" aria-label="设置">⚙</button>
+    <button id="btn-settings" title="设置" aria-label="设置" data-i18n-title="settings.tooltip">⚙</button>
   </header>
 
   <div id="banner" class="banner hidden"></div>
@@ -24,50 +24,77 @@
 
   <div id="empty" class="empty hidden">
     <div class="empty-icon">⌘</div>
-    <p>未发现运行中的 Claude Code 会话</p>
-    <p class="hint">在 WSL 终端里启动 claude 即可自动识别</p>
+    <p data-i18n="empty.title">未发现运行中的 Claude Code 会话</p>
+    <p class="hint" data-i18n="empty.hint">在 WSL 终端里启动 claude 即可自动识别</p>
   </div>
 
   <section id="settings" class="settings hidden">
-    <h2>设置</h2>
+    <h2 data-i18n="settings.title">设置</h2>
     <form id="settings-form">
-      <label>轮询间隔（秒）
+      <label><span data-i18n="set.language">语言 / Language</span>
+        <select name="language">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <label><span data-i18n="set.poll">轮询间隔（秒）</span>
         <input type="number" name="pollIntervalSecs" min="2" max="120" />
       </label>
-      <label>活跃判定（秒）——多长时间无输出算“空闲”
+      <label><span data-i18n="set.idle">活跃判定（秒）——多长时间无输出算“空闲”</span>
         <input type="number" name="idleGreenSecs" min="10" max="3600" />
       </label>
-      <label>超时判定（秒）——等待响应超过该时长视为 API 超时
+      <label><span data-i18n="set.blocked">超时判定（秒）——等待响应超过该时长视为 API 超时</span>
         <input type="number" name="blockedAfterSecs" min="60" max="86400" />
       </label>
-      <label>自动继续
-        <input type="checkbox" name="autoContinue" />
-      </label>
-      <label>关闭窗口时最小化到托盘（后台继续监控）
-        <input type="checkbox" name="closeToTray" />
-      </label>
-      <label>等待时长（小时）——红灯后多久自动继续
+      <label class="check-row"><input type="checkbox" name="autoContinue" />
+        <span data-i18n="set.auto">自动继续</span></label>
+      <label class="check-row"><input type="checkbox" name="closeToTray" />
+        <span data-i18n="set.tray">关闭窗口时最小化到托盘（后台继续监控）</span></label>
+      <label><span data-i18n="set.wait">等待时长（小时）——红灯后多久自动继续</span>
         <input type="number" name="waitHours" min="0" max="24" step="0.5" />
       </label>
-      <label>继续按键（tmux 键名，空格分隔）
+      <label><span data-i18n="set.keys">继续按键（tmux 键名，空格分隔）</span>
         <input type="text" name="resumeKeys" placeholder="Enter" />
       </label>
-      <label>最大自动尝试次数
+      <label><span data-i18n="set.max">最大自动尝试次数</span>
         <input type="number" name="maxSends" min="1" max="10" />
       </label>
-      <label>重试间隔（分钟）
+      <label><span data-i18n="set.retry">重试间隔（分钟）</span>
         <input type="number" name="retryIntervalMin" min="1" max="120" />
       </label>
-      <label>WSL 发行版（留空 = 默认）
+      <label><span data-i18n="set.distro">WSL 发行版（留空 = 默认）</span>
         <input type="text" name="wslDistro" placeholder="Ubuntu" />
       </label>
+
+      <h3 data-i18n="set.notify">桌面通知</h3>
+      <label class="check-row"><input type="checkbox" name="notifyRed" />
+        <span data-i18n="set.notify.red">会话变红时</span></label>
+      <label class="check-row"><input type="checkbox" name="notifyContinue" />
+        <span data-i18n="set.notify.continue">自动继续已发送时</span></label>
+      <label class="check-row"><input type="checkbox" name="notifyRecovered" />
+        <span data-i18n="set.notify.recovered">红灯解除时</span></label>
+      <label class="check-row"><input type="checkbox" name="notifyTurnEnd" />
+        <span data-i18n="set.notify.turn">回合结束等待输入时</span></label>
+      <label class="check-row"><input type="checkbox" name="notifyExit" />
+        <span data-i18n="set.notify.exit">会话进程退出时</span></label>
+      <label class="check-row"><input type="checkbox" name="soundAlerts" />
+        <span data-i18n="set.sound">提示音（伴随通知）</span></label>
+
+      <h3 data-i18n="set.about">关于</h3>
+      <label class="check-row"><input type="checkbox" name="autoUpdate" />
+        <span data-i18n="set.autoupdate">启动时检查更新</span></label>
+      <div class="row-inline">
+        <span class="hint" id="update-info"></span>
+        <button type="button" class="mini" id="btn-check-update" data-i18n="set.check">检查更新</button>
+        <button type="button" class="mini install hidden" id="btn-install-update" data-i18n="set.install">下载并安装</button>
+      </div>
+
       <div class="settings-actions">
-        <button type="submit" class="primary">保存</button>
-        <button type="button" id="btn-cancel-settings">关闭</button>
+        <button type="submit" class="primary" data-i18n="act.save">保存</button>
+        <button type="button" id="btn-cancel-settings" data-i18n="act.close">关闭</button>
       </div>
     </form>
-    <p class="hint">提示：只有运行在 tmux 里的 Claude Code 才能被自动控制，
-      建议用 <code>tmux new -s work</code> 后在里面启动 claude。</p>
+    <p class="hint"><span data-i18n="hint.tmux1">提示：只有运行在 tmux 里的 Claude Code 才能被自动控制，建议用 </span><code>tmux new -s work</code><span data-i18n="hint.tmux2">后在里面启动 claude。</span></p>
   </section>
 
   <footer>
@@ -75,6 +102,7 @@
     <span id="foot-clock"></span>
   </footer>
 
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

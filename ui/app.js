@@ -10,24 +10,24 @@ const $ = (id) => document.getElementById(id);
    has to keep working in. */
 let snapshot = { sessions: [], warning: null };
 let snapshotAt = Date.now();
+let updateVersion = null;
 
 function fmtIdle(sec) {
   if (sec == null) return "—";
-  if (sec < 60) return `${sec} 秒`;
-  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟`;
+  if (sec < 60) return t("idle.sec", { n: sec });
+  if (sec < 3600) return t("idle.min", { n: Math.floor(sec / 60) });
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
-  return `${h} 小时 ${m} 分`;
+  return t("idle.hour", { h, m });
 }
 
 function fmtCountdown(sec) {
-  if (sec == null || sec <= 0) return "即将发送";
+  if (sec == null || sec <= 0) return t("cd.now");
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
   const pad = (n) => String(n).padStart(2, "0");
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)} 后自动继续`
-               : `${m}:${pad(s)} 后自动继续`;
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 let toastTimer = null;
@@ -56,8 +56,8 @@ function render(sessions, warning) {
     banner.classList.add("hidden");
   }
   $("foot-status").textContent = warning
-    ? "WSL 连接异常"
-    : `WSL 正常 · ${sessions.length} 个会话`;
+    ? t("foot.bad")
+    : t("foot.ok", { n: sessions.length });
 
   const list = $("list");
   const empty = $("empty");
@@ -74,14 +74,13 @@ function render(sessions, warning) {
 
   list.innerHTML = sessions.map((s) => {
     const state = LIGHTS.includes(s.state) ? s.state : "yellow";
-    const rows = [];
     const light = `<span class="light ${state}"></span>`;
     const meta = [
       `<span class="pid">PID ${s.pid}</span>`,
       s.tmuxLabel ? `<span class="tmux">tmux ${escapeHtml(s.tmuxLabel)}</span>`
-                  : `<span class="tmux">无 tmux</span>`,
-      `<span>空闲 ${fmtIdle(s.idleSec)}</span>`,
-      s.tmuxLabel ? "" : `<span class="no-control">仅监控</span>`,
+                  : `<span class="tmux">${t("no.tmux")}</span>`,
+      `<span>${t("meta.idle", { s: fmtIdle(s.idleSec) })}</span>`,
+      s.tmuxLabel ? "" : `<span class="no-control">${t("monitor.only")}</span>`,
     ].filter(Boolean).join("");
 
     let countdown = "";
@@ -91,25 +90,25 @@ function render(sessions, warning) {
         countdown = `<span class="countdown" data-countdown="${s.pid}">${
           countdownText(s, s.remainingSec)}</span>`;
       } else if (!s.controllable) {
-        countdown = `<span class="countdown sent">不在 tmux 中，无法自动继续</span>`;
+        countdown = `<span class="countdown sent">${t("cd.notmux")}</span>`;
       } else if (s.sends > 0) {
-        countdown = `<span class="countdown sent">已自动继续 ${s.sends} 次（已达上限）</span>`;
+        countdown = `<span class="countdown sent">${t("cd.limit", { n: s.sends })}</span>`;
       } else {
-        countdown = `<span class="countdown sent">已停用自动继续</span>`;
+        countdown = `<span class="countdown sent">${t("cd.disabled")}</span>`;
       }
     }
 
     const preview = s.preview ? `<div class="session-preview">“${escapeHtml(s.preview)}”</div>` : "";
     const btn = s.controllable
-      ? `<button class="act" data-pid="${s.pid}">立即继续</button>`
-      : `<span class="no-control">不在 tmux 中，无法控制</span>`;
+      ? `<button class="act" data-pid="${s.pid}">${t("act.continue")}</button>`
+      : `<span class="no-control">${t("no.control")}</span>`;
 
-    rows.push(`
+    return `
       <div class="session">
         <div class="session-top">
           ${light}
           <span class="session-name" title="${escapeHtml(s.cwd)}">${escapeHtml(s.project)}</span>
-          <span class="session-state ${state}">${escapeHtml(s.label)}</span>
+          <span class="session-state ${state}">${escapeHtml(stateLabel(s.label))}</span>
         </div>
         <div class="session-meta">${meta}</div>
         ${preview}
@@ -117,13 +116,14 @@ function render(sessions, warning) {
           ${countdown}
           ${btn}
         </div>
-      </div>`);
-    return rows.join("");
+      </div>`;
   }).join("");
 
-  $("summary").textContent =
-    `● ${counts.green} 运行 · ● ${counts.yellow} 等待 · ● ${counts.red} 超时`;
-
+  $("summary").textContent = t("sum", {
+    g: counts.green,
+    y: counts.yellow,
+    r: counts.red,
+  });
   for (const b of list.querySelectorAll("button.act")) {
     b.addEventListener("click", () => onContinue(Number(b.dataset.pid)));
   }
@@ -137,11 +137,11 @@ function escapeHtml(value) {
   })[c]);
 }
 
-/* A red session shows either "…后自动继续" or, once it has been resumed,
-   "已继续 N 次 · …后重试" — both need the send count in front. */
+/* A red session shows either "…until auto-continue" or, once it has been
+   resumed, "resumed N × · …" — both need the send count in front. */
 function countdownText(session, remainingSec) {
-  const prefix = session.sends > 0 ? `已继续 ${session.sends} 次 · ` : "";
-  return prefix + fmtCountdown(remainingSec);
+  const prefix = session.sends > 0 ? t("cd.resumed", { n: session.sends }) : "";
+  return prefix + fmtCountdown(remainingSec) + t("cd.until");
 }
 
 /* The backend speaks every few seconds; tick the countdowns in between so the
@@ -170,7 +170,7 @@ async function refresh() {
     const res = await invoke("get_status");
     render(res.sessions, res.warning);
   } catch (e) {
-    $("foot-status").textContent = "查询失败";
+    $("foot-status").textContent = t("foot.fail");
     toast(String(e), true);
   }
 }
@@ -179,6 +179,7 @@ async function refresh() {
 
 function loadSettingsForm(s) {
   const f = $("settings-form");
+  f.language.value = s.language || "zh";
   f.pollIntervalSecs.value = s.pollIntervalSecs;
   f.idleGreenSecs.value = s.idleGreenSecs;
   f.blockedAfterSecs.value = s.blockedAfterSecs;
@@ -189,6 +190,13 @@ function loadSettingsForm(s) {
   f.maxSends.value = s.maxSends;
   f.retryIntervalMin.value = Math.round(s.retryIntervalSecs / 60);
   f.wslDistro.value = s.wslDistro;
+  f.notifyRed.checked = s.notifyRed;
+  f.notifyContinue.checked = s.notifyContinue;
+  f.notifyRecovered.checked = s.notifyRecovered;
+  f.notifyTurnEnd.checked = s.notifyTurnEnd;
+  f.notifyExit.checked = s.notifyExit;
+  f.soundAlerts.checked = s.soundAlerts;
+  f.autoUpdate.checked = s.autoUpdate;
 }
 
 async function openSettings() {
@@ -215,6 +223,7 @@ async function saveSettings(ev) {
   // red"), so it must not fall back to the default
   const hours = Number(f.waitHours.value);
   const s = {
+    language: f.language.value === "en" ? "en" : "zh",
     pollIntervalSecs: num(f.pollIntervalSecs.value, 5),
     idleGreenSecs: num(f.idleGreenSecs.value, 120),
     blockedAfterSecs: num(f.blockedAfterSecs.value, 300),
@@ -226,12 +235,55 @@ async function saveSettings(ev) {
     maxSends: num(f.maxSends.value, 3),
     retryIntervalSecs: num(f.retryIntervalMin.value, 10) * 60,
     wslDistro: f.wslDistro.value.trim(),
+    notifyRed: f.notifyRed.checked,
+    notifyContinue: f.notifyContinue.checked,
+    notifyRecovered: f.notifyRecovered.checked,
+    notifyTurnEnd: f.notifyTurnEnd.checked,
+    notifyExit: f.notifyExit.checked,
+    soundAlerts: f.soundAlerts.checked,
+    autoUpdate: f.autoUpdate.checked,
   };
   try {
     await invoke("set_settings", { settings: s });
     closeSettings();
-    toast("设置已保存");
+    toast(t("toast.saved"));
     // the backend re-reads the poll interval on every pass, nothing to restart
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+/* ---------- updates ---------- */
+
+function setUpdateUi(version) {
+  updateVersion = version;
+  $("btn-install-update").classList.toggle("hidden", !version);
+  $("btn-check-update").classList.toggle("hidden", !!version);
+}
+
+async function onUpdateCheck() {
+  const btn = $("btn-check-update");
+  btn.disabled = true;
+  btn.textContent = t("set.checking");
+  try {
+    const v = await invoke("check_update");
+    if (v) {
+      setUpdateUi(v);
+      toast(t("toast.newversion", { v }));
+    } else {
+      toast(t("toast.uptodate"));
+    }
+  } catch (e) {
+    toast(String(e), true);
+  }
+  btn.disabled = false;
+  btn.textContent = t("set.check");
+}
+
+async function onInstallUpdate() {
+  try {
+    toast(t("toast.installing"));
+    await invoke("install_update"); // the app relaunches itself when done
   } catch (e) {
     toast(String(e), true);
   }
@@ -243,9 +295,26 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("btn-settings").addEventListener("click", openSettings);
   $("btn-cancel-settings").addEventListener("click", closeSettings);
   $("settings-form").addEventListener("submit", saveSettings);
+  $("btn-check-update").addEventListener("click", onUpdateCheck);
+  $("btn-install-update").addEventListener("click", onInstallUpdate);
+
+  // language first, so the very first paint already uses it
+  try {
+    setLang((await invoke("get_settings")).language);
+  } catch (_) { /* zh stays */ }
+  listen("settings", (e) => setLang(e.payload.language));
+
+  try {
+    const v = await window.__TAURI__.app.getVersion();
+    $("update-info").textContent = `clawmon v${v}`;
+  } catch (_) { /* version line stays empty */ }
 
   // every poll the backend makes ends up here
   listen("sessions", (event) => render(event.payload.sessions, event.payload.warning));
+  listen("update-available", (event) => {
+    setUpdateUi(event.payload);
+    toast(t("toast.newversion", { v: event.payload }));
+  });
   await refresh();
 
   // WebView2 stops running this page's scripts while the window is hidden

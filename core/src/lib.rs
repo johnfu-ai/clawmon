@@ -9,6 +9,6 @@ pub mod engine;
 pub mod settings;
 pub mod wsl;
 
-pub use detector::{detect, RawSession, RawStatus, TmuxInfo};
-pub use engine::{Engine, SessionState, SessionView};
+pub use detector::{detect, Detector, RawSession, RawStatus, TmuxInfo};
+pub use engine::{Engine, EventKind, SessionEvent, SessionState, SessionView};
 pub use settings::Settings;

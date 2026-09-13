@@ -91,7 +91,7 @@ impl Drop for Fixture {
 fn run(settings: &Settings) -> (Vec<SessionView>, Vec<i32>, clawmon_core::RawStatus) {
     let snap = detect(settings).expect("detect");
     let mut e = Engine::new(settings.clone());
-    let (views, due) = e.update(snap.clone());
+    let (views, due, _) = e.update(snap.clone());
     (views, due, snap)
 }
 
@@ -121,7 +121,7 @@ fn detects_blocked_session_and_auto_continues() {
     // full pass with the engine, mirroring what the poll loop does
     let snap = detect(&st).unwrap();
     let mut e = Engine::new(st.clone());
-    let (_, due) = e.update(snap);
+    let (_, due, _) = e.update(snap);
     assert!(!due.is_empty(), "auto-continue must fire with wait_secs=0");
     for pid in due {
         let pane = e
@@ -237,7 +237,7 @@ fn concurrent_sessions_get_distinct_transcripts() {
     assert_eq!(ours.len(), 2, "both fake claude processes must be found");
 
     let mut e = Engine::new(st);
-    let (views, _) = e.update(snap);
+    let (views, _, _) = e.update(snap);
     let views: Vec<_> = views
         .into_iter()
         .filter(|v| v.cwd == "/tmp/clawmon-it2")

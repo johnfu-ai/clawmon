@@ -27,6 +27,23 @@ pub struct Settings {
     pub wsl_distro: String,
     /// Hide to the system tray instead of exiting when the window is closed.
     pub close_to_tray: bool,
+    /// UI and notification language: "zh" (default) or "en".
+    pub language: String,
+    /// Desktop notification when a session turns red.
+    pub notify_red: bool,
+    /// Desktop notification when resume keys were sent automatically.
+    pub notify_continue: bool,
+    /// Desktop notification when a red session recovers on its own.
+    pub notify_recovered: bool,
+    /// Desktop notification when a session finishes its turn and waits for
+    /// the user's next instruction.
+    pub notify_turn_end: bool,
+    /// Desktop notification when a claude process exits.
+    pub notify_exit: bool,
+    /// Play a system sound alongside the notifications above.
+    pub sound_alerts: bool,
+    /// Check GitHub releases for a newer version at startup.
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -42,6 +59,14 @@ impl Default for Settings {
             retry_interval_secs: 600,
             wsl_distro: String::new(),
             close_to_tray: true,
+            language: "zh".to_string(),
+            notify_red: true,
+            notify_continue: true,
+            notify_recovered: true,
+            notify_turn_end: false,
+            notify_exit: true,
+            sound_alerts: true,
+            auto_update: true,
         }
     }
 }
@@ -85,6 +110,11 @@ impl Settings {
         self.retry_interval_secs = self.retry_interval_secs.clamp(5, 86_400);
         self.resume_keys = sanitize_keys(&self.resume_keys);
         self.wsl_distro = sanitize_distro(&self.wsl_distro);
+        self.language = if self.language == "en" {
+            "en".into()
+        } else {
+            "zh".into()
+        };
         self
     }
 }
@@ -200,5 +230,29 @@ mod tests {
         }
         .sanitize();
         assert_eq!(s.wsl_distro, "");
+    }
+
+    #[test]
+    fn language_is_zh_or_en() {
+        let s = Settings {
+            language: " en ".into(),
+            ..Default::default()
+        }
+        .sanitize();
+        assert_eq!(s.language, "zh", "only the exact word is accepted");
+
+        let s = Settings {
+            language: "en".into(),
+            ..Default::default()
+        }
+        .sanitize();
+        assert_eq!(s.language, "en");
+
+        let s = Settings {
+            language: "fr".into(),
+            ..Default::default()
+        }
+        .sanitize();
+        assert_eq!(s.language, "zh");
     }
 }

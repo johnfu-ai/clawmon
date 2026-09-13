@@ -1,11 +1,11 @@
-use std::io::Read;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// How long we wait for a WSL command before killing it (seconds).
-const CMD_TIMEOUT_SECS: u64 = 25;
+pub const CMD_TIMEOUT_SECS: u64 = 25;
 /// How long we keep waiting for the output pipes *after* the process is gone.
 const DRAIN_GRACE_SECS: u64 = 2;
 /// How often we re-check whether the child has exited.
@@ -148,6 +148,97 @@ pub fn run_wsl_stdin(distro: &str, args: &[&str], input: &str) -> Result<String,
     )
 }
 
+/// A long-lived child inside WSL speaking one-line-in / one-line-out over
+/// its stdio. One resident `python3` for every poll instead of a fresh
+/// `wsl.exe` boot per poll — each of those costs a Windows process spawn
+/// plus a WSL round trip (0.1–1 s).
+pub struct Persistent {
+    child: Child,
+    stdin: ChildStdin,
+    /// stdout lines, handed over by a reader thread so `request` can time
+    /// out without blocking on a pipe that will never see another byte
+    lines: Receiver<String>,
+}
+
+impl Persistent {
+    /// Spawn `args` inside the distro with piped stdio.
+    pub fn spawn(distro: &str, args: &[&str]) -> Result<Persistent, String> {
+        let mut cmd = build_command(distro, args);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("启动常驻进程失败: {e}"))?;
+        let stdin = child.stdin.take().ok_or("无 stdin")?;
+        let stdout = child.stdout.take().ok_or("无 stdout")?;
+        let stderr = child.stderr.take().ok_or("无 stderr")?;
+
+        let (tx, lines) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break, // EOF or broken pipe
+                    Ok(_) => {
+                        if tx.send(line.clone()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        // stderr must never fill its pipe and block the child: swallow it
+        thread::spawn(move || {
+            let mut sink = stderr;
+            let mut buf = Vec::new();
+            let _ = sink.read_to_end(&mut buf);
+        });
+
+        Ok(Persistent {
+            child,
+            stdin,
+            lines,
+        })
+    }
+
+    /// Send one request line, wait for one response line. Any failure marks
+    /// the child as gone so the next call respawns it.
+    pub fn request(&mut self, line: &str, timeout: Duration) -> Result<String, String> {
+        use std::io::Write;
+        self.stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| self.stdin.write_all(b"\n"))
+            .and_then(|_| self.stdin.flush())
+            .map_err(|e| format!("写入常驻进程失败: {e}"))?;
+        match self.lines.recv_timeout(timeout) {
+            Ok(l) => Ok(l.trim_end_matches(['\n', '\r']).to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.kill();
+                Err("常驻进程响应超时".into())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("常驻进程已退出".into()),
+        }
+    }
+
+    /// Still running? A dead child is respawned by the caller.
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Kill and reap, so a wedged WSL cannot leak child processes.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Persistent {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
@@ -215,5 +306,33 @@ mod tests {
             "child {pid} survived the timeout"
         );
         let _ = std::fs::remove_file(&pidfile);
+    }
+
+    #[test]
+    fn persistent_child_answers_requests() {
+        let mut p = Persistent::spawn(
+            "",
+            &[
+                "sh",
+                "-c",
+                "while read -r line; do echo \"got:$line\"; done",
+            ],
+        )
+        .unwrap();
+        assert!(p.is_alive());
+        assert_eq!(p.request("a", Duration::from_secs(5)).unwrap(), "got:a");
+        assert_eq!(p.request("b", Duration::from_secs(5)).unwrap(), "got:b");
+        p.kill();
+        assert!(!p.is_alive());
+    }
+
+    /// No reply within the timeout → the request fails and the child is
+    /// killed, never left wedged for the next poll to trip over.
+    #[test]
+    fn persistent_request_times_out_and_kills() {
+        let mut p = Persistent::spawn("", &["sh", "-c", "cat > /dev/null"]).unwrap();
+        let err = p.request("x", Duration::from_secs(1)).unwrap_err();
+        assert!(err.contains("超时"), "{err}");
+        assert!(!p.is_alive());
     }
 }

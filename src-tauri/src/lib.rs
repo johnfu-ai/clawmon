@@ -1,4 +1,7 @@
-use clawmon_core::{detect, engine::SessionView, settings::Settings, wsl::run_wsl, Engine};
+use clawmon_core::{
+    engine::SessionView, settings::Settings, wsl::run_wsl, Detector, Engine, EventKind,
+    SessionEvent,
+};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::thread;
@@ -8,9 +11,13 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, State, WindowEvent,
 };
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 
 struct AppState {
     engine: Mutex<Engine>,
+    /// the resident detection process, kept across polls
+    detector: Mutex<Detector>,
     settings_path: PathBuf,
     /// The latest snapshot, served to the webview on demand. The window is a
     /// viewer only: the poll loop below keeps running (and keeps pushing
@@ -59,6 +66,97 @@ fn state_counts(sessions: &[SessionView]) -> StatusCounts {
     c
 }
 
+/// System alert sound. Toasts already carry their own chime on Windows,
+/// but an explicit beep stays audible even when notifications are muted or
+/// the banner misses the moment.
+#[cfg(windows)]
+fn play_alert() {
+    use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+    use windows::Win32::UI::WindowsAndMessaging::MB_ICONEXCLAMATION;
+    unsafe {
+        let _ = MessageBeep(MB_ICONEXCLAMATION);
+    }
+}
+
+#[cfg(not(windows))]
+fn play_alert() {}
+
+/// One desktop notification (plus its sound, if enabled).
+fn notify(app: &tauri::AppHandle, title: &str, body: &str, sound: bool) {
+    if sound {
+        play_alert();
+    }
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// (title, body) for a session event, in the configured language.
+fn event_text(lang: &str, kind: EventKind, project: &str) -> (&'static str, String) {
+    let en = lang == "en";
+    match kind {
+        EventKind::TurnedRed => (
+            if en {
+                "Session stuck"
+            } else {
+                "会话疑似卡死"
+            },
+            if en {
+                format!("🔴 {project} looks blocked — will auto-continue as configured")
+            } else {
+                format!("🔴 {project} 疑似 API 超时，将按设置自动继续")
+            },
+        ),
+        EventKind::Recovered => (
+            if en {
+                "Session recovered"
+            } else {
+                "会话已恢复"
+            },
+            if en {
+                format!("🟢 {project} is running again")
+            } else {
+                format!("🟢 {project} 已恢复运行")
+            },
+        ),
+        EventKind::TurnEnd => (
+            if en { "Turn finished" } else { "回合结束" },
+            if en {
+                format!("✅ {project} finished its turn and waits for your input")
+            } else {
+                format!("✅ {project} 本轮任务完成，等待输入")
+            },
+        ),
+        EventKind::Exited => (
+            if en {
+                "Session ended"
+            } else {
+                "会话已结束"
+            },
+            if en {
+                format!("⏹ the claude process for {project} has exited")
+            } else {
+                format!("⏹ {project} 的 claude 进程已退出")
+            },
+        ),
+    }
+}
+
+/// Turn a state transition into a notification, honoring the per-kind
+/// switches. `settings` is the copy this poll started with, so flipping a
+/// switch takes effect on the next poll at the latest.
+fn dispatch_event(app: &tauri::AppHandle, settings: &Settings, ev: SessionEvent) {
+    let enabled = match ev.kind {
+        EventKind::TurnedRed => settings.notify_red,
+        EventKind::Recovered => settings.notify_recovered,
+        EventKind::TurnEnd => settings.notify_turn_end,
+        EventKind::Exited => settings.notify_exit,
+    };
+    if !enabled {
+        return;
+    }
+    let (title, body) = event_text(&settings.language, ev.kind, &ev.project);
+    notify(app, &title, &body, settings.sound_alerts);
+}
+
 fn settings_path(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
@@ -92,17 +190,55 @@ fn poll(app: &tauri::AppHandle) -> u64 {
     let settings = lock(&state.engine).settings.clone();
     let interval = settings.poll_interval_secs;
 
-    let (sessions, warning) = match detect(&settings) {
+    let (sessions, warning) = match lock(&state.detector).detect(&settings) {
         Ok(snap) => {
             // `update` counts every attempt it schedules, so sending the keys
             // below cannot be double-booked by a later poll.
-            let due = lock(&state.engine).update(snap).1;
+            let (views, due, events) = lock(&state.engine).update(snap);
+            for ev in events {
+                dispatch_event(app, &settings, ev);
+            }
             for pid in due {
-                if let Err(e) = send_resume(&state, pid) {
-                    eprintln!("auto-continue 发送失败 pid={pid}: {e}");
+                match send_resume(&state, pid) {
+                    Ok(_) => {
+                        if settings.notify_continue {
+                            // the attempt was already counted by `update`,
+                            // so the fresh views carry the right number
+                            let count = views
+                                .iter()
+                                .find(|v| v.pid == pid)
+                                .map(|v| v.sends)
+                                .unwrap_or(1);
+                            let project = views
+                                .iter()
+                                .find(|v| v.pid == pid)
+                                .map(|v| v.project.clone())
+                                .unwrap_or_default();
+                            let en = settings.language == "en";
+                            let (title, body) = if en {
+                                (
+                                    "Auto-continue sent",
+                                    format!(
+                                        "▶ Sent \"{}\" to {project} (attempt {count})",
+                                        settings.resume_keys
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "已自动继续",
+                                    format!(
+                                        "▶ 已向 {project} 发送「{}」（第 {count} 次）",
+                                        settings.resume_keys
+                                    ),
+                                )
+                            };
+                            notify(app, title, &body, settings.sound_alerts);
+                        }
+                    }
+                    Err(e) => eprintln!("auto-continue 发送失败 pid={pid}: {e}"),
                 }
             }
-            (lock(&state.engine).last_views(), None)
+            (views, None)
         }
         // WSL is unreachable: keep showing the last known sessions rather
         // than an empty list, and say so in the banner
@@ -144,12 +280,13 @@ fn pet_clicked(app: tauri::AppHandle) {
 /// Send the configured resume keys to a session's tmux pane right now.
 #[tauri::command]
 async fn send_continue(state: State<'_, AppState>, pid: i32) -> Result<String, String> {
-    let (pane, keys, distro) = resume_target(&state, pid)?;
+    let (pane, keys, distro, lang) = resume_target(&state, pid)?;
     // the key press itself is a blocking WSL round trip (up to the command
     // timeout) — keep it off the async workers
-    let message = tauri::async_runtime::spawn_blocking(move || send_keys(pane, keys, distro))
-        .await
-        .map_err(|e| format!("发送任务失败: {e}"))??;
+    let message =
+        tauri::async_runtime::spawn_blocking(move || send_keys(pane, keys, distro, &lang))
+            .await
+            .map_err(|e| format!("发送任务失败: {e}"))??;
     lock(&state.engine).record_send(pid);
     Ok(message)
 }
@@ -158,7 +295,7 @@ async fn send_continue(state: State<'_, AppState>, pid: i32) -> Result<String, S
 fn resume_target(
     state: &State<'_, AppState>,
     pid: i32,
-) -> Result<(String, Vec<String>, String), String> {
+) -> Result<(String, Vec<String>, String, String), String> {
     let engine = lock(&state.engine);
     let pane = engine
         .get_session(pid)
@@ -170,23 +307,39 @@ fn resume_target(
         .split_whitespace()
         .map(|s| s.to_string())
         .collect();
-    Ok((pane, keys, engine.settings.wsl_distro.clone()))
+    Ok((
+        pane,
+        keys,
+        engine.settings.wsl_distro.clone(),
+        engine.settings.language.clone(),
+    ))
 }
 
 /// Blocking `tmux send-keys` inside WSL. Keys are passed as argv entries, never
 /// through a shell.
-fn send_keys(pane: String, keys: Vec<String>, distro: String) -> Result<String, String> {
+fn send_keys(
+    pane: String,
+    keys: Vec<String>,
+    distro: String,
+    lang: &str,
+) -> Result<String, String> {
     let mut args: Vec<&str> = vec!["tmux", "send-keys", "-t", &pane];
     for k in &keys {
         args.push(k);
     }
-    run_wsl(&distro, &args).map(|_| format!("已发送 {} → {pane}", keys.join(" ")))
+    run_wsl(&distro, &args).map(|_| {
+        if lang == "en" {
+            format!("Sent {} → {pane}", keys.join(" "))
+        } else {
+            format!("已发送 {} → {pane}", keys.join(" "))
+        }
+    })
 }
 
 /// The auto-continue path: already runs on the poll thread, so it can block.
 fn send_resume(state: &State<'_, AppState>, pid: i32) -> Result<String, String> {
-    let (pane, keys, distro) = resume_target(state, pid)?;
-    send_keys(pane, keys, distro)
+    let (pane, keys, distro, lang) = resume_target(state, pid)?;
+    send_keys(pane, keys, distro, &lang)
 }
 
 #[tauri::command]
@@ -195,13 +348,61 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
 }
 
 #[tauri::command]
-async fn set_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
+async fn set_settings(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<(), String> {
     // the webview is not the only writer of settings.json, so clamp before
     // anything starts acting on the values
     let settings = settings.sanitize();
     settings.save(&state.settings_path)?;
-    lock(&state.engine).settings = settings;
+    lock(&state.engine).settings = settings.clone();
+    // the pet and the main window pick up language changes from this
+    let _ = app.emit("settings", settings);
     Ok(())
+}
+
+/// Latest published version, when one is newer than ours. Blocking.
+fn check_for_update(app: &tauri::AppHandle) -> Result<Option<String>, String> {
+    let update = tauri::async_runtime::block_on(app.updater().map_err(|e| e.to_string())?.check())
+        .map_err(|e| e.to_string())?;
+    Ok(update.map(|u| u.version))
+}
+
+/// Courtesy startup check: runs off the UI thread and only ever speaks
+/// through the `update-available` event. Failures are silent — an offline
+/// machine must not greet every start with an error.
+fn spawn_update_check(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(5));
+        if let Ok(Some(version)) = check_for_update(&app) {
+            let _ = app.emit("update-available", version);
+        }
+    });
+}
+
+/// Manual "check for updates" from the settings panel.
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    // the round trip blocks on the network — keep it off the async workers
+    tauri::async_runtime::spawn_blocking(move || check_for_update(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Download, install and restart. Only called when an update is confirmed
+/// to exist; the app relaunches itself before this returns.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+    let update = tauri::async_runtime::block_on(updater.check())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "已是最新版本".to_string())?;
+    tauri::async_runtime::block_on(update.download_and_install(|_, _| {}, || {}))
+        .map_err(|e| e.to_string())?;
+    // never returns on success
+    app.restart()
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -239,14 +440,66 @@ fn minimize_to_pet(app: &tauri::AppHandle) {
     }
 }
 
+/// Keep the pet window click-through except over the cat itself. The window
+/// is a square slightly larger than the drawing, and its transparent corners
+/// would swallow clicks meant for whatever sits in the screen corner. A
+/// cheap cursor poll toggles window-level hit-test transparency; while a
+/// mouse button is down the toggling pauses, so an active drag of the cat
+/// is never dropped mid-move.
+#[cfg(windows)]
+fn spawn_pet_hit_test(app: tauri::AppHandle) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    thread::spawn(move || {
+        // the cat fills ~92 of the 110 px window; the badge juts a little
+        // further into the margin
+        const INSET: i32 = 6;
+        let mut through: Option<bool> = None;
+        loop {
+            thread::sleep(Duration::from_millis(150));
+            let Some(pet) = app.get_webview_window("pet") else {
+                continue;
+            };
+            // high bit set = currently pressed (i16 negative)
+            let dragging = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
+            let mut click_through = true;
+            if !dragging && pet.is_visible().unwrap_or(false) {
+                if let (Ok(pos), Ok(size)) = (pet.outer_position(), pet.outer_size()) {
+                    let mut pt = POINT::default();
+                    if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+                        let inside = pt.x >= pos.x + INSET
+                            && pt.x < pos.x + size.width as i32 - INSET
+                            && pt.y >= pos.y + INSET
+                            && pt.y < pos.y + size.height as i32 - INSET;
+                        click_through = !inside;
+                    }
+                }
+            }
+            if through != Some(click_through) {
+                let _ = pet.set_ignore_cursor_events(click_through);
+                through = Some(click_through);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn spawn_pet_hit_test(_app: tauri::AppHandle) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let path = settings_path(app.handle());
             let settings = Settings::load(&path);
             app.manage(AppState {
-                engine: Mutex::new(Engine::new(settings)),
+                engine: Mutex::new(Engine::new(settings.clone())),
+                detector: Mutex::new(Detector::new()),
                 settings_path: path,
                 last: Mutex::new(StatusResponse::default()),
             });
@@ -254,6 +507,11 @@ pub fn run() {
             // monitoring starts with the app, not with the window: closing to
             // the tray must not pause anything
             spawn_poll_loop(app.handle().clone());
+
+            if settings.auto_update {
+                spawn_update_check(app.handle().clone());
+            }
+            spawn_pet_hit_test(app.handle().clone());
 
             // park the pet in the bottom-right corner of the primary monitor
             // (raised ~90px so it clears the taskbar)
@@ -332,7 +590,9 @@ pub fn run() {
             send_continue,
             get_settings,
             set_settings,
-            pet_clicked
+            pet_clicked,
+            check_update,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

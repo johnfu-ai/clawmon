@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """WSL-side Claude Code session detector.
 
-Runs inside WSL (invoked as `wsl.exe -e python3 -` with this script on stdin).
-Prints one JSON object to stdout describing every live Claude Code process.
+Runs inside WSL. Two modes:
+  one-shot (default): `python3 -` with this script on stdin — print one JSON
+    object describing every live Claude Code process, then exit.
+  resident (`--serve`): stay alive and run one scan per non-empty stdin
+    line, answering with one JSON line per request. The Windows side keeps
+    this process across polls — one resident python3 is much cheaper than a
+    fresh wsl.exe boot per poll.
 
 No third-party dependencies; Python 3.6+ stdlib only.
 """
@@ -407,7 +412,19 @@ def last_entry(path):
     }
 
 
-def main():
+def collect():
+    """One detection pass; returns the status dict without printing.
+
+    In resident mode this runs once per request, so per-run caches must be
+    reset here: a cached /proc status would survive a dead pid and poison
+    the ancestor walk of whichever process recycles it later.
+    """
+    _status_cache.clear()
+    # first timestamps are immutable per transcript file, so this cache may
+    # live across scans — but it must not grow without bound
+    if len(_first_ts_cache) > 4096:
+        _first_ts_cache.clear()
+
     time_now = datetime.now(timezone.utc)
     panes = tmux_panes()
 
@@ -485,12 +502,42 @@ def main():
                         0, int(time_now.timestamp() - ts))
         sessions.append(info)
     sessions.sort(key=lambda s: s["pid"])
-    json.dump({"now": time_now.isoformat(),
-               "now_epoch": time_now.timestamp(),
-               "sessions": sessions},
-              sys.stdout, ensure_ascii=False)
+    return {"now": time_now.isoformat(),
+            "now_epoch": time_now.timestamp(),
+            "sessions": sessions}
+
+
+def emit(scan):
+    json.dump(scan, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def main():
+    emit(collect())
+
+
+def serve():
+    """Resident mode: one scan per non-empty stdin line, one JSON line back.
+
+    An internal error is reported as `{"error": ...}` — unparsable as a
+    status on the Rust side, which then falls back to a one-shot run (and
+    its real error message) instead of silently treating the poll as empty.
+    """
+    for line in sys.stdin:
+        cmd = line.strip()
+        if cmd == "quit":
+            break
+        if not cmd:
+            continue
+        try:
+            emit(collect())
+        except Exception as e:  # noqa: BLE001 - the driver handles the error
+            emit({"error": str(e)})
 
 
 if __name__ == "__main__":
-    main()
+    if "--serve" in sys.argv[1:]:
+        serve()
+    else:
+        main()

@@ -7,6 +7,12 @@ on:
 permissions:
   contents: write
 
+env:
+  # Updater signing material. Only set when the repo secrets exist; without
+  # them the release still ships installers, just no updater artifacts.
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -18,10 +24,42 @@ jobs:
       - uses: swatinem/rust-cache@v2
 
       - name: Install tauri CLI
-        run: cargo install tauri-cli --version "^2"
+        run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build
+      # createUpdaterArtifacts comes in via --config so local builds (and CI
+      # runs without the signing secret) keep building exactly as before
+      - name: Build (with updater artifacts)
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        run: cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+      - name: Build (without updater artifacts)
+        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
         run: cargo tauri build
+
+      # The updater manifest: points the app at the signed msi on this
+      # release. Only usable when the build was actually signed.
+      - name: Generate latest.json (updater manifest)
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $sig = Get-ChildItem "target/release/bundle/msi/*.msi.sig" | Select-Object -First 1
+          if (-not $sig) { throw "no signed updater artifact (.msi.sig) found" }
+          $msi = $sig.FullName -replace '\.sig$', ''
+          $json = @{
+            version = $version
+            notes = "clawmon $tag"
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = (Get-Content $sig.FullName -Raw).Trim()
+                url = "https://github.com/${{ github.repository }}/releases/download/$tag/$(Split-Path $msi -Leaf)"
+              }
+            }
+          } | ConvertTo-Json -Depth 5
+          $json | Out-File -FilePath latest.json -Encoding utf8NoBOM
+          Get-Content latest.json
 
       - name: Attach artifacts to release
         uses: softprops/action-gh-release@v2
@@ -31,3 +69,9 @@ jobs:
             target/release/clawmon.exe
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
+
+      - name: Attach updater manifest to release
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.json

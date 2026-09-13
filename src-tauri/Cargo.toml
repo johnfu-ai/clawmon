@@ -14,9 +14,25 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 clawmon-core = { path = "../core" }
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+# native-tls instead of the default rustls: schannel on Windows needs no C
+# build, which keeps the Linux cross-check (`cargo check --target
+# x86_64-pc-windows-msvc`) usable
+tauri-plugin-updater = { version = "2", default-features = false, features = [
+    "native-tls",
+    "zip",
+    "system-proxy",
+] }
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-# only used to show the pet without stealing focus (SW_SHOWNOACTIVATE)
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# SW_SHOWNOACTIVATE (pet without stealing focus), MessageBeep (alerts),
+# GetCursorPos/GetAsyncKeyState (pet click-through hotspot)
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Diagnostics_Debug",
+] }

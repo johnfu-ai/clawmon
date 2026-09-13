@@ -7,13 +7,18 @@ const root = document.getElementById("pet");
 const badge = document.getElementById("badge");
 
 const STATE_LABEL = {
-  green: "一切正常",
-  yellow: "有会话在等待",
-  red: "有会话疑似卡死",
-  off: "WSL 连接异常",
+  green: ["一切正常", "All good"],
+  yellow: ["有会话在等待", "Sessions waiting"],
+  red: ["有会话疑似卡死", "Session may be stuck"],
+  off: ["WSL 连接异常", "WSL unreachable"],
 };
+const CLICK_HINT = ["点击打开主窗口", "click to open the main window"];
+
+let lang = "zh";
+let lastStatus = { red: 0, yellow: 0, green: 0 };
 
 function applyStatus(s) {
+  lastStatus = s;
   let state = "green";
   let count = 0;
   if (s.warning) {
@@ -26,7 +31,8 @@ function applyStatus(s) {
     count = s.yellow;
   }
   root.dataset.state = state;
-  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🟢${s.green}\n${STATE_LABEL[state]}（点击打开主窗口）`;
+  const i = lang === "en" ? 1 : 0;
+  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🟢${s.green}\n${STATE_LABEL[state][i]}（${CLICK_HINT[i]}）`;
 
   badge.classList.toggle("hidden", count === 0);
   badge.classList.toggle("yellow", state === "yellow");
@@ -35,6 +41,17 @@ function applyStatus(s) {
 
 /* the backend emits "status" after each poll of the main window */
 listen("status", (e) => applyStatus(e.payload));
+
+/* follow language changes made in the main window's settings */
+invoke("get_settings").then((s) => {
+  const was = lang;
+  lang = s.language === "en" ? "en" : "zh";
+  if (was !== lang) applyStatus(lastStatus);
+}).catch(() => {});
+listen("settings", (e) => {
+  lang = e.payload.language === "en" ? "en" : "zh";
+  applyStatus(lastStatus);
+});
 
 /* ---------- click vs drag ---------- */
 const DRAG_SLOP = 5; // px of movement before a press turns into a window drag
