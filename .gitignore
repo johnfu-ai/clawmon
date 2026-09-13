@@ -3,3 +3,6 @@ target/
 *.log
 /src-tauri/gen/schemas
 __pycache__/
+
+# AI collaboration log — local only, never commit
+ai-log.md
