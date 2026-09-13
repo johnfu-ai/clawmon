@@ -42,6 +42,8 @@ pub struct Settings {
     pub notify_exit: bool,
     /// Play a system sound alongside the notifications above.
     pub sound_alerts: bool,
+    /// Query the GLM Coding Plan quota and show it in the header.
+    pub show_glm_usage: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +66,7 @@ impl Default for Settings {
             notify_turn_end: false,
             notify_exit: true,
             sound_alerts: true,
+            show_glm_usage: true,
         }
     }
 }

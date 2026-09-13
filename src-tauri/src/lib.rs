@@ -1,6 +1,6 @@
 use clawmon_core::{
-    engine::SessionView, settings::Settings, wsl::run_wsl, Detector, Engine, EventKind,
-    SessionEvent,
+    engine::SessionView, settings::Settings, usage::UsageInfo, wsl::run_wsl, Detector, Engine,
+    EventKind, SessionEvent,
 };
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -22,6 +22,8 @@ struct AppState {
     /// viewer only: the poll loop below keeps running (and keeps pushing
     /// events at it) whether or not there is a window on screen.
     last: Mutex<StatusResponse>,
+    /// Latest plan-quota snapshot from the usage loop below.
+    last_usage: Mutex<Option<UsageInfo>>,
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -263,11 +265,58 @@ fn spawn_poll_loop(app: tauri::AppHandle) {
     });
 }
 
+/// How often the GLM plan quota is re-queried. The 5-hour window moves
+/// slowly; a few minutes of staleness costs nothing and keeps us off the
+/// provider's monitor API.
+const USAGE_REFRESH_SECS: u64 = 300;
+
+/// Independent loop for the plan-quota chip. Deliberately not part of the
+/// detector or its resident process: an HTTP round trip (or a hung one,
+/// up to the command timeout) must never couple to the poll cadence. A
+/// failing query only means the chip keeps its last good value.
+fn spawn_usage_loop(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut was_enabled = true;
+        loop {
+            let settings = {
+                let state = app.state::<AppState>();
+                let engine = lock(&state.engine);
+                engine.settings.clone()
+            };
+            if settings.show_glm_usage {
+                match clawmon_core::usage::query_usage(&settings) {
+                    Ok(info) => {
+                        let state = app.state::<AppState>();
+                        *lock(&state.last_usage) = Some(info.clone());
+                        let _ = app.emit("usage", info);
+                    }
+                    Err(e) => eprintln!("usage query failed: {e}"),
+                }
+                was_enabled = true;
+            } else if was_enabled {
+                // the toggle flipped off: clear what is on screen once
+                let state = app.state::<AppState>();
+                *lock(&state.last_usage) = None;
+                let _ = app.emit("usage", None::<UsageInfo>);
+                was_enabled = false;
+            }
+            thread::sleep(Duration::from_secs(USAGE_REFRESH_SECS));
+        }
+    });
+}
+
 /// The latest snapshot, for the window to render on startup and after being
 /// restored from the tray. Detection itself is driven by the poll loop.
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<StatusResponse, String> {
     Ok(lock(&state.last).clone())
+}
+
+/// Latest plan-quota snapshot for the header chip's initial paint; the
+/// refresh itself runs on the usage loop.
+#[tauri::command]
+async fn get_usage(state: State<'_, AppState>) -> Result<Option<UsageInfo>, String> {
+    Ok(lock(&state.last_usage).clone())
 }
 
 /// The desktop pet was clicked: bring the main window back. The pet itself
@@ -486,11 +535,14 @@ pub fn run() {
                 detector: Mutex::new(Detector::new()),
                 settings_path: path,
                 last: Mutex::new(StatusResponse::default()),
+                last_usage: Mutex::new(None),
             });
 
             // monitoring starts with the app, not with the window: closing to
             // the tray must not pause anything
             spawn_poll_loop(app.handle().clone());
+
+            spawn_usage_loop(app.handle().clone());
 
             spawn_pet_hit_test(app.handle().clone());
 
@@ -564,6 +616,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
+            get_usage,
             send_continue,
             get_settings,
             set_settings,

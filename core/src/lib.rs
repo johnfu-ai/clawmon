@@ -7,8 +7,10 @@
 pub mod detector;
 pub mod engine;
 pub mod settings;
+pub mod usage;
 pub mod wsl;
 
-pub use detector::{detect, Detector, RawSession, RawStatus, TmuxInfo};
+pub use detector::{detect, Detector, RawSession, RawStatus, RawUsage, TmuxInfo};
 pub use engine::{Engine, EventKind, SessionEvent, SessionState, SessionView};
 pub use settings::Settings;
+pub use usage::{parse_usage, query_usage, UsageInfo, UsageLimit};
