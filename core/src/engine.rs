@@ -63,6 +63,9 @@ pub struct SessionView {
     pub label: String,
     pub idle_sec: Option<i64>,
     pub preview: String,
+    /// tokens consumed by this session so far (display only — never feeds
+    /// the red/yellow/green classification)
+    pub usage: Option<crate::detector::RawUsage>,
     /// tmux pane id, present only when we can control this session
     pub pane: Option<String>,
     pub controllable: bool,
@@ -266,6 +269,7 @@ impl Engine {
                 label: label.to_string(),
                 idle_sec: s.idle_sec,
                 preview: s.preview.clone(),
+                usage: s.usage,
                 pane: s.tmux.as_ref().map(|t| t.pane.clone()),
                 controllable,
                 blocked_since: t.blocked_since,
@@ -322,6 +326,7 @@ mod tests {
             last_ts: String::new(),
             idle_sec: Some(idle),
             preview: "做点什么".into(),
+            usage: None,
             tool_running: false,
             transcript_live: true,
         }
@@ -341,6 +346,25 @@ mod tests {
         let (v, due, _) = e.update(snap(1000, vec![session(1, "assistant", 10)]));
         assert_eq!(v[0].state, SessionState::Green);
         assert!(due.is_empty());
+    }
+
+    /// Usage is display data: it must reach the view intact and never
+    /// change the classification.
+    #[test]
+    fn usage_passes_through_to_view() {
+        let mut e = Engine::new(Settings::default());
+        let mut s = session(1, "assistant", 10);
+        s.usage = Some(crate::detector::RawUsage {
+            input: 1_100_000,
+            cache_read: 1_200_000,
+            cache_creation: 5_000,
+            output: 89_000,
+            requests: 42,
+        });
+        let (v, _, _) = e.update(snap(1000, vec![s]));
+        assert_eq!(v[0].state, SessionState::Green);
+        let u = v[0].usage.expect("usage present");
+        assert_eq!((u.input, u.output, u.requests), (1_100_000, 89_000, 42));
     }
 
     #[test]

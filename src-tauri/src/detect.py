@@ -412,6 +412,90 @@ def last_entry(path):
     }
 
 
+# ---- per-session token usage --------------------------------------------
+#
+# Transcripts write one assistant record per streamed content block, and
+# every duplicate repeats the whole `message.usage` of that API request —
+# summing naively overcounts 2-3x. So we keep, per file, the LAST usage
+# per message id and sum over the ids (unique ids ≈ API requests; ids are
+# server-side unique, so parent and subagent maps merge cleanly).
+# Subagent transcripts (<session-id>/subagents/agent-*.jsonl) carry the
+# same records and count toward the session. In resident mode the cache
+# makes repeat scans incremental: only appended bytes are parsed.
+
+_usage_cache = {}
+
+
+def scan_usage(path):
+    """Fold newly appended transcript bytes into the per-file id map."""
+    entry = _usage_cache.get(path)
+    if entry is None:
+        entry = _usage_cache[path] = {"offset": 0, "ids": {}}
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return entry
+    if size < entry["offset"]:
+        # truncated or rewritten from scratch — totals must be rebuilt
+        entry["offset"] = 0
+        entry["ids"] = {}
+    if size == entry["offset"]:
+        return entry
+    with open(path, "rb") as fh:
+        fh.seek(entry["offset"])
+        data = fh.read()
+    end = data.rfind(b"\n")
+    if end < 0:
+        return entry  # the new bytes hold no complete line yet
+    for raw in data[:end].split(b"\n"):
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if d.get("type") != "assistant":
+            continue
+        msg = d.get("message") or {}
+        mid = msg.get("id")
+        usage = msg.get("usage")
+        if not mid or not isinstance(usage, dict):
+            continue  # cannot dedupe → summing it is the overcount
+        entry["ids"][mid] = usage
+    entry["offset"] += end + 1
+    return entry
+
+
+def transcript_usage(path):
+    """Total usage of a session: main transcript + subagent transcripts."""
+    states = [scan_usage(path)]
+    directory = os.path.dirname(path)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    for sub in sorted(glob.glob(
+            os.path.join(directory, stem, "subagents", "agent-*.jsonl"))):
+        states.append(scan_usage(sub))
+    ids = {}
+    for st in states:
+        ids.update(st["ids"])
+    if not ids:
+        return None
+
+    def _n(d, k):
+        v = d.get(k)
+        return v if isinstance(v, (int, float)) else 0
+
+    return {
+        "input": int(sum(_n(u, "input_tokens") for u in ids.values())),
+        "cache_read": int(sum(
+            _n(u, "cache_read_input_tokens") for u in ids.values())),
+        "cache_creation": int(sum(
+            _n(u, "cache_creation_input_tokens") for u in ids.values())),
+        "output": int(sum(_n(u, "output_tokens") for u in ids.values())),
+        "requests": len(ids),
+    }
+
+
 def collect():
     """One detection pass; returns the status dict without printing.
 
@@ -424,6 +508,9 @@ def collect():
     # live across scans — but it must not grow without bound
     if len(_first_ts_cache) > 4096:
         _first_ts_cache.clear()
+    # usage caches are the same kind of state, but subagent files churn
+    if len(_usage_cache) > 512:
+        _usage_cache.clear()
 
     time_now = datetime.now(timezone.utc)
     panes = tmux_panes()
@@ -484,6 +571,7 @@ def collect():
             "preview": "",
             "tool_running": False,
             "transcript_live": False,
+            "usage": None,
         }
         transcript = info["transcript"]
         if transcript:
@@ -500,6 +588,10 @@ def collect():
                 if ts is not None:
                     info["idle_sec"] = max(
                         0, int(time_now.timestamp() - ts))
+            try:
+                info["usage"] = transcript_usage(transcript)
+            except Exception:
+                info["usage"] = None  # usage must never cost a poll
         sessions.append(info)
     sessions.sort(key=lambda s: s["pid"])
     return {"now": time_now.isoformat(),

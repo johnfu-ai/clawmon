@@ -33,6 +33,9 @@ pub struct RawSession {
     pub last_ts: String,
     pub idle_sec: Option<i64>,
     pub preview: String,
+    /// tokens consumed by this session so far (None before the first scan)
+    #[serde(default)]
+    pub usage: Option<RawUsage>,
     /// the last transcript entry is an assistant message with a tool_use
     /// block — a tool (e.g. a long Bash command) is still executing
     #[serde(default)]
@@ -46,6 +49,23 @@ pub struct RawSession {
 
 fn trusted() -> bool {
     true
+}
+
+/// Per-session token usage aggregated by the detector: assistant
+/// `message.usage` deduped by message id (unique ids ≈ API requests),
+/// subagent transcripts included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawUsage {
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_creation: u64,
+    #[serde(default)]
+    pub output: u64,
+    #[serde(default)]
+    pub requests: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,6 +177,10 @@ mod tests {
                 "last_ts": "2026-09-08T07:30:09.435Z",
                 "idle_sec": 5,
                 "preview": "hello",
+                "usage": {
+                    "input": 1100000, "cache_read": 1200000,
+                    "cache_creation": 5000, "output": 89000, "requests": 42
+                },
                 "tool_running": false,
                 "transcript_live": true
             }]
@@ -165,6 +189,12 @@ mod tests {
         assert_eq!(st.sessions.len(), 1);
         assert_eq!(st.sessions[0].tmux.as_ref().unwrap().pane, "%0");
         assert_eq!(st.sessions[0].idle_sec, Some(5));
+        let u = st.sessions[0].usage.expect("usage present");
+        assert_eq!(u.input, 1_100_000);
+        assert_eq!(u.cache_read, 1_200_000);
+        assert_eq!(u.cache_creation, 5_000);
+        assert_eq!(u.output, 89_000);
+        assert_eq!(u.requests, 42);
         assert!(st.sessions[0].transcript_live);
     }
 
@@ -178,6 +208,107 @@ mod tests {
         let st: RawStatus = serde_json::from_str(raw).unwrap();
         assert!(st.sessions[0].transcript_live);
         assert!(!st.sessions[0].tool_running);
+        assert!(st.sessions[0].usage.is_none());
+    }
+
+    /// `usage` is optional too — and every field inside it defaults, so a
+    /// leaner payload still parses.
+    #[test]
+    fn missing_usage_defaults_to_none() {
+        let raw = r#"{"now":"x","now_epoch":1.0,"sessions":[{"pid":1,"cwd":"/a",
+            "tty":"","tmux":null,"transcript":null,"session_id":"",
+            "last_type":"","last_ts":"","idle_sec":null,"preview":"",
+            "usage":{}}]}"#;
+        let st: RawStatus = serde_json::from_str(raw).unwrap();
+        let u = st.sessions[0].usage.expect("usage present");
+        assert_eq!(u, RawUsage::default());
+    }
+
+    /// Drives the real detect.py scanner in one python process: duplicate
+    /// message ids dedupe (last record wins), appended bytes fold in
+    /// incrementally, a truncated file resets the cache, and subagent
+    /// transcripts count toward the session (Linux only; like the live
+    /// tests it needs a real python3).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn transcript_usage_dedupes_and_increments() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+main = os.path.join(work, "sess.jsonl")
+
+def rec(mid, inp, out=0):
+    return json.dumps({
+        "type": "assistant",
+        "message": {"id": mid, "role": "assistant",
+                    "usage": {"input_tokens": inp, "output_tokens": out,
+                              "cache_read_input_tokens": 0,
+                              "cache_creation_input_tokens": 0}},
+        "timestamp": "2026-09-13T00:00:00Z",
+    })
+
+results = []
+with open(main, "w") as f:
+    f.write(rec("msg_a", 100) + "\n")
+    f.write(rec("msg_a", 300) + "\n")   # duplicate id: last one wins
+    f.write(rec("msg_b", 50, 7) + "\n")
+    f.write(rec(None, 999) + "\n")      # no id: skipped, not summed
+results.append(mod.transcript_usage(main))
+
+with open(main, "a") as f:              # appended bytes fold in
+    f.write(rec("msg_c", 10, 1) + "\n")
+results.append(mod.transcript_usage(main))
+
+with open(main, "w") as f:              # rewritten shorter: reset + rescan
+    f.write(rec("msg_b", 50, 7) + "\n")
+results.append(mod.transcript_usage(main))
+
+sub = os.path.join(work, "sess", "subagents")   # subagent usage folds in
+os.makedirs(sub)
+with open(os.path.join(sub, "agent-x.jsonl"), "w") as f:
+    f.write(rec("msg_s", 10, 2) + "\n")
+results.append(mod.transcript_usage(main))
+
+print(json.dumps(results))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("work");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        fs::create_dir(&work).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let results: Vec<Option<RawUsage>> =
+            serde_json::from_slice(&out.stdout).expect("driver printed usage JSON");
+        let u = |i: usize| results[i].expect("usage present");
+        // msg_a(300) + msg_b(50); the id-less record never counts
+        assert_eq!((u(0).input, u(0).output, u(0).requests), (350, 7, 2));
+        // + msg_c(10/1)
+        assert_eq!((u(1).input, u(1).output, u(1).requests), (360, 8, 3));
+        // file rewritten to just msg_b: cache reset, totals rebuilt
+        assert_eq!((u(2).input, u(2).output, u(2).requests), (50, 7, 1));
+        // + subagent msg_s(10/2)
+        assert_eq!((u(3).input, u(3).output, u(3).requests), (60, 9, 2));
     }
 
     #[test]

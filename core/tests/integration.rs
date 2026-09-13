@@ -47,7 +47,7 @@ impl Fixture {
         std::fs::write(
             &transcript,
             concat!(
-                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","sessionId":"itest","cwd":"/tmp/clawmon-it","message":{"role":"assistant","content":[{"type":"text","text":"前一轮回复"}]}}"#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","sessionId":"itest","cwd":"/tmp/clawmon-it","message":{"id":"msg_it_1","role":"assistant","content":[{"type":"text","text":"前一轮回复"}],"usage":{"input_tokens":100,"cache_read_input_tokens":10,"cache_creation_input_tokens":5,"output_tokens":50}}}"#, "\n",
                 r#"{"type":"user","timestamp":"2026-01-01T00:10:00Z","sessionId":"itest","cwd":"/tmp/clawmon-it","message":{"role":"user","content":"继续干活"}}"#, "\n",
             ),
         )
@@ -117,6 +117,12 @@ fn detects_blocked_session_and_auto_continues() {
     assert_eq!(v.label, "疑似 API 超时");
     assert!(v.controllable, "tmux session should be controllable");
     assert!(v.remaining_sec.is_some());
+    // usage rides along the whole pipe: transcript → detector → view
+    let u = v.usage.expect("fixture usage detected");
+    assert_eq!(
+        (u.input, u.cache_read, u.output, u.requests),
+        (100, 10, 50, 1)
+    );
 
     // full pass with the engine, mirroring what the poll loop does
     let snap = detect(&st).unwrap();
