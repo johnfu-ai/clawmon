@@ -157,19 +157,19 @@ scripts/build-local.sh
 ```
 core/                 纯逻辑 crate（不依赖 Tauri，可单独测试）
   src/detector.rs      WSL 检测调用（常驻进程 + 一次性降级）+ JSON 解析
+  src/detect.py        内嵌的 WSL 侧检测脚本（一次性 / --serve 常驻两种模式）
   src/engine.rs        状态机（红黄灯判定、倒计时、自动继续调度、事件边沿检测）
   src/settings.rs      设置持久化 + 取值校验
   src/usage.rs         GLM 套餐配额查询调用 + JSON 解析
+  src/usage.py         内嵌的 WSL 侧配额查询脚本（读 ~/.claude/settings.json，令牌不出 WSL）
   src/wsl.rs           wsl.exe 调用封装（Windows）/ 直接调用（Linux 测试）+ 常驻子进程
 src-tauri/
-  src/detect.py        内嵌的 WSL 侧检测脚本（一次性 / --serve 常驻两种模式）
-  src/usage.py         内嵌的 WSL 侧配额查询脚本（读 ~/.claude/settings.json，令牌不出 WSL）
   src/lib.rs           轮询线程 + 用量线程 + 通知 + Tauri 命令胶水层
 scripts/
   build-local.sh       WSL 驱动本机 Windows 工具链出 exe（见「构建」一节）
   win-clippy.sh        从 WSL 跑与 CI windows 作业一致的 clippy
 ui/                   静态前端（HTML/CSS/JS，无构建步骤）
-  i18n.js              中英双语字典（zh 为默认，en 为翻译）
+  i18n.js              中英双语字典（zh 为默认，en 为翻译；主窗口与宠物共用）
   pet.html/pet.js      桌面宠物（透明置顶小窗，常驻的状态化身）
 ```
 
@@ -195,7 +195,7 @@ ui/                   静态前端（HTML/CSS/JS，无构建步骤）
 cargo test -p clawmon-core                          # 单元测试
 cargo test -p clawmon-core --test integration -- --ignored   # 端到端（需 tmux）
 cargo clippy -p clawmon-core --all-targets          # 静态检查
-python3 -m py_compile src-tauri/src/detect.py       # 检测脚本
+python3 -m py_compile core/src/detect.py core/src/usage.py   # WSL 侧脚本
 ```
 
 以上（含上面那条端到端用例）都会在 CI 里跑，见 `.github/workflows/ci.yml`。
@@ -209,5 +209,5 @@ rustup target add x86_64-pc-windows-msvc
 scripts/win-clippy.sh    # 等价于 CI windows 作业的 clippy -D warnings
 ```
 
-（`.tools/bin/llvm-rc` 是一个占位 stub，仅为绕过 `tauri-winres` 对资源
-编译器的依赖；真正的 Windows 构建不需要它。）
+（`win-clippy.sh` 会在 `.tools/bin/llvm-rc` 自动生成一个占位 stub，仅为绕过
+`tauri-winres` 对资源编译器的依赖；真正的 Windows 构建不需要它。）

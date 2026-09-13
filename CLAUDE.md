@@ -2,8 +2,10 @@
 
 Claude Code WSL session monitor: a Tauri 2 Windows app that watches claude
 processes inside WSL and auto-continues stuck sessions via `tmux send-keys`.
-`core/` is platform-independent logic with the tests; `src-tauri/` is the
-Windows shell; `ui/` is plain static HTML/JS (no bundler).
+`core/` is platform-independent logic with the tests — including the WSL-side
+Python scripts (`core/src/detect.py`, `core/src/usage.py`) and the driver
+tests that run them; `src-tauri/` is the Windows shell; `ui/` is plain
+static HTML/JS (no bundler).
 
 ## Building and verifying from the WSL session
 
@@ -46,4 +48,16 @@ was deliberately removed (2026-09-13, user decision) — do not reintroduce it.
   the cost of a false red is pressing Enter in an unrelated terminal.
 - The resident detector (`detect.py --serve`) must degrade to the one-shot
   pipe on any failure — a broken resident process must never lose a poll.
+- Manual and automatic sends share one invariant: book the attempt in the
+  engine (under its lock) *before* the WSL round trip, or a poll firing
+  mid-send presses Enter a second time.
+- Rust→JS wire shapes are pinned by tests (`session_view_serializes_the_
+  wire_contract`, `usage_info_serializes_the_wire_contract`): any field
+  rename must be cross-checked against the ui/app.js readers named there.
+- Language policy: webview text lives in ui/i18n.js (reason/pet keys), native
+  text (notifications, tray) is formatted in the shell; there is no shared
+  table between the two because no bundler bridges Rust and JS. Diagnostics
+  from core (banner/toast errors) are Chinese-only by the same argument.
+- Never hold two AppState mutexes at once (see the rule in src-tauri/src/
+  lib.rs).
 - `ai-log.md`: append one entry per user task per the global rules.
