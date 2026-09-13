@@ -73,3 +73,21 @@ Remove the auto-update feature entirely (user decided against it after hearing w
 
 ### Outcome
 App now has notifications, resident detector, exit/turn-end detection, i18n, sound, and pet click-through — without auto-update. Releases remain tag-driven on GitHub's Windows runners. Nothing pushed yet.
+
+## [2026-09-13 16:40] Push, verify on real Windows CI, release v0.2.0
+
+### User prompt
+"继续下一步，完成目标"
+
+### Goal interpretation
+Finish the goal end to end: push the commits, let the real Windows CI validate the build, and cut the v0.2.0 release via the existing tag-driven workflow.
+
+### Actions taken
+- Committed the pending log entry (a05ea96), pushed main, tagged v0.2.0 and pushed the tag to trigger the release workflow.
+- First CI run failed on the Windows job: newer clippy (1.98) flagged a needless borrow at lib.rs:156 (`&title` where `title` is already `&'static str`) — a gap the local `cargo check` cross-compile cannot see since check does not run clippy lints. Fixed, and closed the gap locally by running `cargo clippy --target x86_64-pc-windows-msvc -p clawmon --all-targets -- -D warnings`, which works and now passes.
+- Cancelled the in-flight release run that was building the pre-fix commit, moved the v0.2.0 tag to the fix commit (af615b4), re-triggered the release.
+- Second CI run: green (ubuntu tests + windows clippy). Release run: green; artifacts attached (clawmon.exe, clawmon_0.2.0_x64-setup.exe, clawmon_0.2.0_x64_en-US.msi).
+- Wrote the release notes (zh) via `gh release edit`, including a note that the briefly-added in-app updater was removed by the author's decision.
+
+### Outcome
+v0.2.0 published: https://github.com/johnfu-ai/clawmon/releases/tag/v0.2.0. main == v0.2.0 == af615b4. All nine goal items complete (auto-update built then removed at the user's request). Remaining, user-side only: download and run the exe on a real Windows desktop to see toasts / pet click-through / sound in action.
