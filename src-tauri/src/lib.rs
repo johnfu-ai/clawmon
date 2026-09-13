@@ -153,7 +153,7 @@ fn dispatch_event(app: &tauri::AppHandle, settings: &Settings, ev: SessionEvent)
         return;
     }
     let (title, body) = event_text(&settings.language, ev.kind, &ev.project);
-    notify(app, &title, &body, settings.sound_alerts);
+    notify(app, title, &body, settings.sound_alerts);
 }
 
 fn settings_path(app: &tauri::AppHandle) -> PathBuf {
