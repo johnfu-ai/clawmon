@@ -195,7 +195,6 @@ function loadSettingsForm(s) {
   f.notifyTurnEnd.checked = s.notifyTurnEnd;
   f.notifyExit.checked = s.notifyExit;
   f.soundAlerts.checked = s.soundAlerts;
-  f.autoUpdate.checked = s.autoUpdate;
 }
 
 async function openSettings() {
@@ -240,7 +239,6 @@ async function saveSettings(ev) {
     notifyTurnEnd: f.notifyTurnEnd.checked,
     notifyExit: f.notifyExit.checked,
     soundAlerts: f.soundAlerts.checked,
-    autoUpdate: f.autoUpdate.checked,
   };
   try {
     await invoke("set_settings", { settings: s });
