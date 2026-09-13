@@ -270,7 +270,8 @@ async fn get_status(state: State<'_, AppState>) -> Result<StatusResponse, String
     Ok(lock(&state.last).clone())
 }
 
-/// The desktop pet was clicked: bring the main window back and dismiss the pet.
+/// The desktop pet was clicked: bring the main window back. The pet itself
+/// stays on screen — it is the persistent status indicator and launcher.
 #[tauri::command]
 fn pet_clicked(app: tauri::AppHandle) {
     show_main_window(&app);
@@ -363,9 +364,6 @@ async fn set_settings(
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(pet) = app.get_webview_window("pet") {
-        let _ = pet.hide();
-    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
@@ -373,10 +371,10 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// Minimizing the main window turns it into the desktop pet: hide the window
-/// (taskbar entry goes with it), let the cat take over — without stealing
-/// focus from whatever the user switched to.
-fn minimize_to_pet(app: &tauri::AppHandle) {
+/// Show the pet without stealing focus from whatever the user is doing.
+/// The pet is a permanent fixture: it appears at startup and survives every
+/// show/hide of the main window (only quitting the app removes it).
+fn show_pet(app: &tauri::AppHandle) {
     if let Some(pet) = app.get_webview_window("pet") {
         #[cfg(windows)]
         {
@@ -392,16 +390,47 @@ fn minimize_to_pet(app: &tauri::AppHandle) {
             let _ = pet.show();
         }
     }
+}
+
+/// Minimizing the main window hides it (taskbar entry goes with it) and hands
+/// the monitoring face entirely to the pet.
+fn minimize_to_pet(app: &tauri::AppHandle) {
+    show_pet(app);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
 }
 
-/// Keep the pet window click-through except over the cat itself. The window
+/// Toggle hit-test transparency by flipping ONLY `WS_EX_TRANSPARENT` on the
+/// pet window. Tauri's `set_ignore_cursor_events` rewrites the whole extended
+/// style and drops `WS_EX_LAYERED` when clearing the flag — the very style a
+/// transparent WebView2 window renders through — which blanks the pet the
+/// moment the cursor enters it. The pet stays layered for its whole lifetime,
+/// so toggling the single transparency bit switches between click-through and
+/// interactive without ever disturbing rendering.
+#[cfg(windows)]
+fn set_pet_click_through(pet: &tauri::WebviewWindow, through: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
+    };
+    if let Ok(hwnd) = pet.hwnd() {
+        unsafe {
+            let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let style = if through {
+                style | WS_EX_TRANSPARENT.0 as isize
+            } else {
+                style & !(WS_EX_TRANSPARENT.0 as isize)
+            };
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+        }
+    }
+}
+
+/// Keep the pet window click-through except over the crab itself. The window
 /// is a square slightly larger than the drawing, and its transparent corners
 /// would swallow clicks meant for whatever sits in the screen corner. A
 /// cheap cursor poll toggles window-level hit-test transparency; while a
-/// mouse button is down the toggling pauses, so an active drag of the cat
+/// mouse button is down the toggling pauses, so an active drag of the crab
 /// is never dropped mid-move.
 #[cfg(windows)]
 fn spawn_pet_hit_test(app: tauri::AppHandle) {
@@ -410,7 +439,7 @@ fn spawn_pet_hit_test(app: tauri::AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     thread::spawn(move || {
-        // the cat fills ~92 of the 110 px window; the badge juts a little
+        // the crab fills ~92 of the 110 px window; the badge juts a little
         // further into the margin
         const INSET: i32 = 6;
         let mut through: Option<bool> = None;
@@ -435,7 +464,7 @@ fn spawn_pet_hit_test(app: tauri::AppHandle) {
                 }
             }
             if through != Some(click_through) {
-                let _ = pet.set_ignore_cursor_events(click_through);
+                set_pet_click_through(&pet, click_through);
                 through = Some(click_through);
             }
         }
@@ -466,7 +495,8 @@ pub fn run() {
             spawn_pet_hit_test(app.handle().clone());
 
             // park the pet in the bottom-right corner of the primary monitor
-            // (raised ~90px so it clears the taskbar)
+            // (raised ~90px so it clears the taskbar) and put it on screen for
+            // good: it is the always-on status face, not a minimize artifact
             if let Some(pet) = app.get_webview_window("pet") {
                 let size = pet
                     .outer_size()
@@ -480,6 +510,7 @@ pub fn run() {
                     ));
                 }
             }
+            show_pet(app.handle());
 
             // system tray: keeps the monitor alive with the window closed
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
@@ -528,12 +559,6 @@ pub fn run() {
                 if window.label() == "main" && window.is_minimized().unwrap_or(false) =>
             {
                 minimize_to_pet(window.app_handle());
-            }
-            // the window came back some other way (tray, taskbar) — cat can nap
-            WindowEvent::Focused(true) if window.label() == "main" => {
-                if let Some(pet) = window.app_handle().get_webview_window("pet") {
-                    let _ = pet.hide();
-                }
             }
             _ => {}
         })
