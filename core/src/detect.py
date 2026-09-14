@@ -66,6 +66,21 @@ def read_status(pid):
     return info
 
 
+def is_interactive_tty(tty):
+    """True when stdin is a live terminal the user could still type in.
+
+    Closing a WSL / Windows Terminal tab shuts the pty master. A process
+    that ignores SIGHUP (typical of node, which Claude Code is) keeps
+    running; its fd 0 then reads as `/dev/pts/N (deleted)`. A prefix
+    match alone would keep listing that ghost as a session.
+    """
+    if not tty or " (deleted)" in tty:
+        return False
+    if not tty.startswith(("/dev/pts/", "/dev/tty", "/dev/console")):
+        return False
+    return os.path.exists(tty)
+
+
 def is_claude(cmd):
     if not cmd:
         return False
@@ -625,7 +640,7 @@ def collect():
     procs = [
         p for p in procs
         if not (matched & ancestors(p["pid"]))
-        and p["tty"].startswith(("/dev/pts/", "/dev/tty", "/dev/console"))
+        and is_interactive_tty(p["tty"])
     ]
 
     # pass 2: one transcript per process (concurrent sessions don't share)

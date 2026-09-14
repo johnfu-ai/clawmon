@@ -749,4 +749,120 @@ print(json.dumps({
             "the outer claude of the pair is a normal session"
         );
     }
+
+    /// Regression: closing the WSL / Windows Terminal tab shuts the pty
+    /// master. A process that ignores SIGHUP (node / Claude Code) keeps
+    /// running; `/proc/<pid>/fd/0` then reads as `/dev/pts/N (deleted)`.
+    /// The prefix check used to treat that as still interactive, so the
+    /// monitor kept a ghost row. Drives the real `collect()`: listed
+    /// while the master is open, dropped after it closes, and the
+    /// process must still be alive so "not listed" is not vacuous.
+    /// (Linux only; needs a real /proc and `setsid`.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn closed_pty_claude_is_not_a_session() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, subprocess, sys, time
+
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# Re-parent to init so a claude ancestor of this driver cannot filter us.
+# Ignore SIGHUP so the hangup of the closed terminal does not kill the
+# fixture — that is the ghost the monitor used to keep listing.
+pf = os.path.join(work, "pid")
+master, slave = os.openpty()
+subprocess.Popen(
+    ["setsid", "--fork", "bash", "-c",
+     "echo $$ > %s; trap '' HUP; exec -a claude sleep 60" % pf],
+    stdin=slave, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+os.close(slave)
+
+def wait_pid():
+    for _ in range(40):
+        try:
+            with open(pf) as f:
+                return int(f.read().strip())
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError("pidfile never appeared")
+
+def listed(pid):
+    return pid in {s["pid"] for s in mod.collect()["sessions"]}
+
+def tty_of(pid):
+    try:
+        return os.readlink("/proc/%d/fd/0" % pid)
+    except OSError as e:
+        return str(e)
+
+pid = wait_pid()
+time.sleep(0.2)
+alive_before = os.path.exists("/proc/%d" % pid)
+listed_before = listed(pid)
+tty_before = tty_of(pid)
+
+os.close(master)
+time.sleep(0.4)
+alive_after = os.path.exists("/proc/%d" % pid)
+tty_after = tty_of(pid) if alive_after else None
+listed_after = listed(pid) if alive_after else None
+
+try:
+    os.kill(pid, 9)
+except OSError:
+    pass
+
+print(json.dumps({
+    "pid": pid,
+    "alive_before": alive_before,
+    "listed_before": listed_before,
+    "tty_before": tty_before,
+    "alive_after": alive_after,
+    "listed_after": listed_after,
+    "tty_after": tty_after,
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed its verdict");
+        assert_eq!(
+            result["alive_before"], true,
+            "fixture must be running before the hangup: {result}"
+        );
+        assert_eq!(
+            result["listed_before"], true,
+            "a live pts-stdin claude must be listed: {result}"
+        );
+        assert_eq!(
+            result["alive_after"], true,
+            "fixture must survive the hangup (SIGHUP ignored), else \
+             'not listed' is vacuous: {result}"
+        );
+        assert_eq!(
+            result["listed_after"], false,
+            "a claude whose terminal has been closed must not stay listed: {result}"
+        );
+    }
 }
