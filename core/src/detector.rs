@@ -42,6 +42,10 @@ pub struct RawSession {
     /// block — a tool (e.g. a long Bash command) is still executing
     #[serde(default)]
     pub tool_running: bool,
+    /// name of that pending tool_use block ("" when none) — Task/Agent/
+    /// TaskOutput mean claude is waiting on a subagent, not a plain tool
+    #[serde(default)]
+    pub tool_name: String,
     /// the transcript was written at or after this process started, so it is
     /// known to belong to it rather than being a stale file the fallback
     /// pairing heuristics handed us. Absent payloads default to trusted.
@@ -189,6 +193,7 @@ mod tests {
                     "cache_creation": 5000, "output": 89000, "requests": 42
                 },
                 "tool_running": false,
+                "tool_name": "",
                 "transcript_live": true
             }]
         }"#;
@@ -215,6 +220,7 @@ mod tests {
         let st: RawStatus = serde_json::from_str(raw).unwrap();
         assert!(st.sessions[0].transcript_live);
         assert!(!st.sessions[0].tool_running);
+        assert!(st.sessions[0].tool_name.is_empty());
         assert!(st.sessions[0].usage.is_none());
     }
 
@@ -329,6 +335,125 @@ print(json.dumps(results))
         }"#;
         let st: RawStatus = serde_json::from_str(raw).unwrap();
         assert!(st.sessions[0].tmux.is_none());
+    }
+
+    /// A finished turn is followed by timestamped `system` records
+    /// (`turn_duration`). Classification must still see the assistant
+    /// reply, not the trailer — otherwise a completed session goes red.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_skips_system_turn_trailer() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+detect_path, path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+with open(path, "w") as f:
+    f.write(json.dumps({
+        "type": "assistant", "timestamp": "2026-09-14T02:42:31.521Z",
+        "sessionId": "s1",
+        "message": {"content": [{"type": "text", "text": "Done — committed."}]},
+    }) + "\n")
+    f.write(json.dumps({
+        "type": "system", "subtype": "stop_hook_summary",
+        "timestamp": "2026-09-14T02:42:31.541Z", "sessionId": "s1",
+    }) + "\n")
+    f.write(json.dumps({
+        "type": "system", "subtype": "turn_duration",
+        "timestamp": "2026-09-14T02:42:31.546Z", "sessionId": "s1",
+    }) + "\n")
+print(json.dumps(mod.last_entry(path)))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("sess.jsonl");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let entry: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        assert_eq!(entry["type"], "assistant", "{entry}");
+        assert!(
+            entry["preview"].as_str().unwrap_or("").starts_with("Done"),
+            "{entry}"
+        );
+        assert_eq!(entry["tool_running"], false);
+    }
+
+    /// While a subagent runs, the main transcript ends on the assistant
+    /// tool_use that started the wait (here a blocking TaskOutput poll —
+    /// the exact shape of a session parked on "Waiting for task") plus
+    /// untimestamped trailers. `last_entry` must surface the pending
+    /// tool's name: the engine's green "waiting for subagent" state keys
+    /// on it. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_reports_pending_subagent_tool() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+detect_path, path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+with open(path, "w") as f:
+    f.write(json.dumps({
+        "type": "assistant", "timestamp": "2026-09-15T03:17:36.834Z",
+        "sessionId": "s1",
+        "message": {"content": [{"type": "text", "text": "继续阻塞等待完成"}]},
+    }) + "\n")
+    f.write(json.dumps({
+        "type": "assistant", "timestamp": "2026-09-15T03:17:37.043Z",
+        "sessionId": "s1",
+        "message": {"content": [
+            {"type": "tool_use", "id": "call_x", "name": "TaskOutput",
+             "input": {"taskId": "afeb3dc99f65de26"}}]},
+    }) + "\n")
+    f.write(json.dumps({"type": "last-prompt", "sessionId": "s1"}) + "\n")
+    f.write(json.dumps({"type": "mode", "sessionId": "s1"}) + "\n")
+print(json.dumps(mod.last_entry(path)))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("sess.jsonl");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let entry: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        assert_eq!(entry["type"], "assistant", "{entry}");
+        assert_eq!(entry["tool_running"], true, "{entry}");
+        assert_eq!(entry["tool_name"], "TaskOutput", "{entry}");
     }
 
     /// Live smoke test (only meaningful inside WSL).

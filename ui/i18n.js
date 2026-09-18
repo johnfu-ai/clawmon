@@ -56,6 +56,7 @@ const T = {
   "reason.no_transcript": ["未找到记录", "No transcript"],
   "reason.transcript_stale": ["记录未就绪", "Transcript not ready"],
   "reason.tool_running": ["工具运行中", "Tool running"],
+  "reason.waiting_subagent": ["等待 Subagent", "Waiting for subagent"],
   "reason.waiting_input": ["等待输入", "Waiting for input"],
   "reason.waiting_response": ["等待响应", "Waiting for response"],
   "reason.response_timed_out": ["疑似 API 超时", "Likely API timeout"],

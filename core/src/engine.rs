@@ -22,6 +22,10 @@ pub enum Reason {
     NoTranscript,
     TranscriptStale,
     ToolRunning,
+    /// claude is parked on a subagent (Task/Agent spawn or a blocking
+    /// TaskOutput poll) — green, because the subagents are the ones
+    /// making progress and the wait can outlast any idle window
+    WaitingSubagent,
     WaitingInput,
     WaitingResponse,
     ResponseTimedOut,
@@ -170,20 +174,31 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     }
     // a tool_use block is the last transcript activity: the tool result is
     // only appended when the tool *finishes*, so claude is legitimately busy
-    // (e.g. a long Bash command) — never blocked
+    // (e.g. a long Bash command) — never blocked. Waiting on a subagent is
+    // its own kind of busy: the subagents write their own transcripts while
+    // this one goes quiet, the wait routinely outlasts every idle window,
+    // and it is forward progress — so green, never "waiting for input".
     if s.tool_running {
+        if matches!(s.tool_name.as_str(), "Task" | "Agent" | "TaskOutput") {
+            return (SessionState::Green, Reason::WaitingSubagent);
+        }
         return (SessionState::Yellow, Reason::ToolRunning);
     }
     // claude finished its turn and is waiting for the human
     if s.last_type == "assistant" {
         return (SessionState::Yellow, Reason::WaitingInput);
     }
-    // waiting for claude to respond — if it stays this way too long the API
-    // side is likely exhausted (usage limit pause)
-    if idle >= st.blocked_after_secs {
-        (SessionState::Red, Reason::ResponseTimedOut)
+    // only a trailing *user* prompt is "waiting on the API". A `system`
+    // record after a finished reply (`turn_duration`, hook summary) is
+    // bookkeeping — treating it as a hang would go red and press Enter.
+    if s.last_type == "user" {
+        if idle >= st.blocked_after_secs {
+            (SessionState::Red, Reason::ResponseTimedOut)
+        } else {
+            (SessionState::Yellow, Reason::WaitingResponse)
+        }
     } else {
-        (SessionState::Yellow, Reason::WaitingResponse)
+        (SessionState::Yellow, Reason::WaitingInput)
     }
 }
 
@@ -408,6 +423,7 @@ mod tests {
             preview: "做点什么".into(),
             usage: None,
             tool_running: false,
+            tool_name: String::new(),
             transcript_live: true,
         }
     }
@@ -509,6 +525,23 @@ mod tests {
         let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 300)]), &st);
         assert_eq!(v[0].state, SessionState::Yellow);
         assert_eq!(v[0].reason, Reason::WaitingInput);
+    }
+
+    /// A finished turn is often followed by timestamped `system` records
+    /// (`turn_duration`, hook summaries). Those must not look like a hang
+    /// waiting on the API — false red auto-sends Enter.
+    #[test]
+    fn system_trailer_after_a_turn_is_waiting_input_not_red() {
+        let st = Settings {
+            wait_secs: 0,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let (v, due, _) = e.update(snap(10_000, vec![session(1, "system", 1000)]), &st);
+        assert_eq!(v[0].state, SessionState::Yellow);
+        assert_eq!(v[0].reason, Reason::WaitingInput);
+        assert!(due.is_empty());
+        assert!(v[0].blocked_since.is_none());
     }
 
     #[test]
@@ -699,12 +732,34 @@ mod tests {
         let mut e = Engine::new();
         let mut s = session(1, "assistant", 7200); // 2h "idle" while tool runs
         s.tool_running = true;
+        s.tool_name = "Bash".into();
         let t0 = 10_000;
         let (v, due, _) = e.update(snap(t0, vec![s]), &st);
         assert_eq!(v[0].state, SessionState::Yellow);
         assert_eq!(v[0].reason, Reason::ToolRunning);
         assert!(due.is_empty());
         assert!(v[0].blocked_since.is_none());
+    }
+
+    /// A session parked on "Waiting for task" — the pending tool is a
+    /// subagent launch or a blocking TaskOutput poll. The subagents do the
+    /// writing while the main transcript sits on its tool_use, so this is
+    /// healthy progress however long it lasts: green, with its own tag,
+    /// never yellow "waiting for input".
+    #[test]
+    fn waiting_on_a_subagent_is_green() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        for name in ["Task", "Agent", "TaskOutput"] {
+            let mut s = session(1, "assistant", 7200); // subagents ran 2h
+            s.tool_running = true;
+            s.tool_name = name.into();
+            let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
+            assert_eq!(v[0].state, SessionState::Green, "{name}");
+            assert_eq!(v[0].reason, Reason::WaitingSubagent, "{name}");
+            assert!(due.is_empty());
+            assert!(v[0].blocked_since.is_none());
+        }
     }
 
     #[test]

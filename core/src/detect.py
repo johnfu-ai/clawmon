@@ -427,13 +427,21 @@ def final_marker_tail(path):
     return isinstance(d, dict) and "type" in d and "timestamp" not in d
 
 
+# Conversation entries we classify on. Claude Code appends timestamped
+# `system` records after a finished turn (`turn_duration`, hook summaries);
+# those must not hide the assistant/user entry classify actually needs.
+_TURN_TYPES = ("user", "assistant")
+
+
 def last_entry(path):
     """Parse the last complete JSON line of the transcript.
 
-    Returns dict with type, timestamp, session_id, preview, tool_running.
-    `tool_running` is True when the last timestamped entry is an assistant
-    message containing a tool_use block — the tool result is only appended
-    when the tool finishes, so this is exactly "a tool is executing now".
+    Returns dict with type, timestamp, session_id, preview, tool_running,
+    tool_name. `tool_running` is True when the last timestamped *turn* entry
+    is an assistant message containing a tool_use block — the tool result is
+    only appended when the tool finishes, so this is exactly "a tool is
+    executing now"; `tool_name` is that block's tool. Trailing `system`
+    bookkeeping is skipped.
     """
     try:
         tail = read_tail(path)
@@ -443,8 +451,8 @@ def last_entry(path):
     entry = None
     session_id = None
     preview = ""
-    # walk from the end; keep the last parseable line as the entry, and also
-    # grab the nearest assistant text for a preview
+    # walk from the end; keep the last user/assistant line as the entry,
+    # and also grab the nearest assistant text for a preview
     for line in reversed(lines):
         line = line.strip()
         if not line.startswith("{"):
@@ -455,7 +463,7 @@ def last_entry(path):
             continue
         if session_id is None:
             session_id = d.get("sessionId") or d.get("session_id")
-        if entry is None and "type" in d and "timestamp" in d:
+        if entry is None and d.get("type") in _TURN_TYPES and "timestamp" in d:
             entry = d
         if not preview and d.get("type") == "assistant":
             msg = d.get("message") or {}
@@ -471,18 +479,22 @@ def last_entry(path):
     if entry is None:
         return None
     tool_running = False
+    tool_name = ""
     if entry.get("type") == "assistant":
         content = (entry.get("message") or {}).get("content") or []
         if isinstance(content, list):
-            tool_running = any(
-                isinstance(b, dict) and b.get("type") == "tool_use"
-                for b in content)
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    tool_running = True
+                    tool_name = str(b.get("name") or "")
+                    break
     return {
         "type": entry.get("type", ""),
         "timestamp": entry.get("timestamp", ""),
         "session_id": session_id or "",
         "preview": preview,
         "tool_running": tool_running,
+        "tool_name": tool_name,
     }
 
 
@@ -660,6 +672,7 @@ def collect():
             "idle_sec": None,
             "preview": "",
             "tool_running": False,
+            "tool_name": "",
             "transcript_live": False,
             "usage": None,
         }
@@ -674,6 +687,7 @@ def collect():
                 info["last_ts"] = le["timestamp"]
                 info["preview"] = le["preview"]
                 info["tool_running"] = le["tool_running"]
+                info["tool_name"] = le["tool_name"]
                 ts = parse_ts(le["timestamp"])
                 if ts is not None:
                     info["idle_sec"] = max(
