@@ -173,8 +173,8 @@ fn update_status_followers(app: &tauri::AppHandle, sessions: &[SessionView], war
     c.warning = warning;
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(&format!(
-            "clawmon — 🔴{} 🟡{} 🟢{}",
-            c.red, c.yellow, c.green
+            "clawmon — 🔴{} 🟡{} 🔵{} 🟢{}",
+            c.red, c.yellow, c.blue, c.green
         )));
     }
     let _ = app.emit("status", c);

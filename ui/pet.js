@@ -10,12 +10,13 @@ const badge = document.getElementById("badge");
 
 const STATE_KEY = {
   green: "pet.green",
+  blue: "pet.blue",
   yellow: "pet.yellow",
   red: "pet.red",
   off: "pet.off",
 };
 
-let lastStatus = { red: 0, yellow: 0, green: 0 };
+let lastStatus = { red: 0, yellow: 0, blue: 0, green: 0 };
 
 function applyStatus(s) {
   lastStatus = s;
@@ -29,13 +30,17 @@ function applyStatus(s) {
   } else if (s.yellow > 0) {
     state = "yellow";
     count = s.yellow;
+  } else if (s.blue > 0) {
+    state = "blue";
+    count = s.blue;
   }
   root.dataset.state = state;
-  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🟢${s.green}\n${
+  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🔵${s.blue} 🟢${s.green}\n${
     t(STATE_KEY[state])}（${t("pet.click")}）`;
 
   badge.classList.toggle("hidden", count === 0);
   badge.classList.toggle("yellow", state === "yellow");
+  badge.classList.toggle("blue", state === "blue");
   badge.textContent = count;
 }
 

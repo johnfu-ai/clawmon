@@ -5,6 +5,7 @@
   --text: #d7dde6;
   --muted: #7b8798;
   --green: #3ddc84;
+  --blue: #58a6ff;
   --yellow: #f5c542;
   --red: #ff5f56;
   --accent: #6aa1ff;
@@ -97,6 +98,7 @@ main {
   background: var(--muted);
 }
 .light.green  { background: var(--green);  box-shadow: 0 0 6px var(--green); }
+.light.blue   { background: var(--blue);   box-shadow: 0 0 6px var(--blue); }
 .light.yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
 .light.red    { background: var(--red);    box-shadow: 0 0 6px var(--red); animation: blink 1s ease-in-out infinite; }
 
@@ -106,6 +108,7 @@ main {
 .session-state { font-size: 12px; color: var(--muted); }
 .session-state.red { color: var(--red); }
 .session-state.yellow { color: var(--yellow); }
+.session-state.blue { color: var(--blue); }
 .session-state.green { color: var(--green); }
 
 .session-meta {

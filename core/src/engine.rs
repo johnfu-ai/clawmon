@@ -7,6 +7,9 @@ use std::collections::HashMap;
 #[serde(rename_all = "lowercase")]
 pub enum SessionState {
     Green,
+    /// the turn completed and claude awaits the next instruction — done, not
+    /// stuck and not asking anything
+    Blue,
     Yellow,
     Red,
 }
@@ -28,7 +31,10 @@ pub enum Reason {
     /// TaskOutput poll) — green, because the subagents are the ones
     /// making progress and the wait can outlast any idle window
     WaitingSubagent,
-    /// the session is waiting for the human: the turn ended, or a parked
+    /// the turn ended and claude awaits the next instruction — blue, the
+    /// "completed" light: nothing is wrong, it is simply done
+    TurnComplete,
+    /// the session is blocked on the human *mid-flight*: a parked
     /// AskUserQuestion whose "tool result" IS the user's answer
     WaitingInput,
     /// the last entry is a user prompt and claude has not answered yet —
@@ -88,7 +94,8 @@ struct Tracked {
     last_send_at: Option<i64>,
     /// state at the previous poll, for edge detection
     last_state: Option<SessionState>,
-    /// the previous poll already saw this session "waiting for input"
+    /// the previous poll already saw this session awaiting the user (turn
+    /// complete or a parked AskUserQuestion)
     was_waiting_input: bool,
 }
 
@@ -122,13 +129,14 @@ pub struct SessionView {
     pub countdown: Option<Countdown>,
 }
 
-/// (red, yellow, green) counts plus a warning flag — the aggregate the tray
-/// tooltip and the desktop pet render.
+/// (red, yellow, blue, green) counts plus a warning flag — the aggregate the
+/// tray tooltip and the desktop pet render.
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCounts {
     pub red: u32,
     pub yellow: u32,
+    pub blue: u32,
     pub green: u32,
     pub warning: bool,
 }
@@ -139,6 +147,7 @@ pub fn state_counts(sessions: &[SessionView]) -> StatusCounts {
         match s.state {
             SessionState::Red => c.red += 1,
             SessionState::Yellow => c.yellow += 1,
+            SessionState::Blue => c.blue += 1,
             SessionState::Green => c.green += 1,
         }
     }
@@ -163,10 +172,11 @@ fn basename(p: &str) -> String {
 }
 
 /// Light semantics: green means "no user action needed" — claude is working,
-/// waiting on the API, or waiting on a tool/subagent. Yellow means the session
-/// is waiting for the human, or we cannot tell what it is waiting for.
-/// Red stays exclusively the auto-continue case: a user prompt that has gone
-/// unanswered past the timeout.
+/// waiting on the API, or waiting on a tool/subagent. Blue means the turn
+/// completed and claude awaits the next instruction: done, not asking anything.
+/// Yellow means the session is blocked on the user mid-flight, or we cannot
+/// tell what it is waiting for. Red stays exclusively the auto-continue case:
+/// a user prompt that has gone unanswered past the timeout.
 fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     let idle = s.idle_sec.unwrap_or(i64::MAX);
     // transcript activity within the green window → actively working
@@ -201,9 +211,10 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
         }
         return (SessionState::Green, Reason::ToolRunning);
     }
-    // claude finished its turn and is waiting for the human
+    // claude finished its turn: completed work awaiting the next instruction —
+    // its own light, distinct from both "busy" and "asking you something"
     if s.last_type == "assistant" {
-        return (SessionState::Yellow, Reason::WaitingInput);
+        return (SessionState::Blue, Reason::TurnComplete);
     }
     // only a trailing *user* prompt is "waiting on the API" — slow is not
     // stuck, so green until the timeout window says otherwise. A `system`
@@ -303,19 +314,20 @@ impl Engine {
                 *t = Tracked::default();
             }
 
-            // claude finished its turn and now waits for the human — worth a
-            // poke for anyone running long unattended jobs. Fire on the edge
-            // only (and never on the very first sighting: a monitor started
-            // mid-wait should not report a turn that ended hours ago).
-            let waiting_input = state == SessionState::Yellow && reason == Reason::WaitingInput;
-            if waiting_input && !prev_waiting && prev_state.is_some() {
+            // claude finished its turn (or parked an AskUserQuestion) and now
+            // waits for the human — worth a poke for anyone running long
+            // unattended jobs. Fire on the edge only (and never on the very
+            // first sighting: a monitor started mid-wait should not report a
+            // turn that ended hours ago).
+            let awaits_user = matches!(reason, Reason::TurnComplete | Reason::WaitingInput);
+            if awaits_user && !prev_waiting && prev_state.is_some() {
                 events.push(SessionEvent {
                     pid: s.pid,
                     kind: EventKind::TurnEnd,
                     project: basename(&s.cwd),
                 });
             }
-            t.was_waiting_input = waiting_input;
+            t.was_waiting_input = awaits_user;
             t.last_state = Some(state);
 
             let controllable = s.tmux.is_some();
@@ -387,7 +399,8 @@ impl Engine {
             let rank = |s: &SessionView| match s.state {
                 SessionState::Red => 0,
                 SessionState::Yellow => 1,
-                SessionState::Green => 2,
+                SessionState::Blue => 2,
+                SessionState::Green => 3,
             };
             rank(a).cmp(&rank(b)).then(a.pid.cmp(&b.pid))
         });
@@ -536,13 +549,15 @@ mod tests {
         assert_eq!(cd["remainingSec"], 100);
     }
 
+    /// A finished turn is "done", not "asking you": blue with its own tag,
+    /// so the yellow light stays reserved for mid-flight user blocks.
     #[test]
-    fn yellow_waiting_for_input() {
+    fn completed_turn_is_blue() {
         let st = Settings::default();
         let mut e = Engine::new();
         let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 300)]), &st);
-        assert_eq!(v[0].state, SessionState::Yellow);
-        assert_eq!(v[0].reason, Reason::WaitingInput);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::TurnComplete);
     }
 
     /// A finished turn is often followed by timestamped `system` records
@@ -800,18 +815,21 @@ mod tests {
     }
 
     #[test]
-    fn sorts_red_first() {
+    fn sorts_red_yellow_blue_green() {
         let st = Settings::default();
         let mut e = Engine::new();
         let (v, _, _) = e.update(
             snap(
                 1000,
-                vec![session(5, "assistant", 10), session(9, "user", 900)],
+                vec![
+                    session(5, "assistant", 10),  // green (active)
+                    session(6, "assistant", 300), // blue (turn complete)
+                    session(9, "user", 900),      // red (timed out)
+                ],
             ),
             &st,
         );
-        assert_eq!(v[0].pid, 9);
-        assert_eq!(v[1].pid, 5);
+        assert_eq!(v.iter().map(|s| s.pid).collect::<Vec<_>>(), [9, 6, 5]);
     }
 
     #[test]
@@ -821,12 +839,16 @@ mod tests {
         let (v, _, _) = e.update(
             snap(
                 1000,
-                vec![session(5, "assistant", 10), session(9, "user", 900)],
+                vec![
+                    session(5, "assistant", 10),  // green (active)
+                    session(6, "assistant", 300), // blue (turn complete)
+                    session(9, "user", 900),      // red (timed out)
+                ],
             ),
             &st,
         );
         let c = state_counts(&v);
-        assert_eq!((c.red, c.yellow, c.green), (1, 0, 1));
+        assert_eq!((c.red, c.yellow, c.blue, c.green), (1, 0, 1, 1));
         assert!(!c.warning);
     }
 

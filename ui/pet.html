@@ -48,11 +48,13 @@
     /* happy eyes blink; other eye sets are swapped per state below */
     .eyes { display: none; }
     #pet[data-state="green"]  .eyes.happy,
+    #pet[data-state="blue"]   .eyes.happy,
     #pet[data-state="yellow"] .eyes.asleep,
     #pet[data-state="red"]    .eyes.alarmed,
     #pet[data-state="off"]    .eyes.asleep { display: block; }
 
-    #pet[data-state="green"] .eyes .eye {
+    #pet[data-state="green"] .eyes .eye,
+    #pet[data-state="blue"]  .eyes .eye {
       transform-box: fill-box;
       transform-origin: center;
       animation: blink 4.2s infinite;
@@ -64,6 +66,7 @@
 
     .mouth { display: none; }
     #pet[data-state="green"]  .mouth.smile,
+    #pet[data-state="blue"]   .mouth.smile,
     #pet[data-state="yellow"] .mouth.smile,
     #pet[data-state="red"]    .mouth.gasp { display: block; }
 
@@ -105,6 +108,7 @@
       border: 2px solid #fff;
     }
     #badge.yellow { background: #eab308; color: #78350f; }
+    #badge.blue { background: #3b82f6; color: #fff; }
     #badge.hidden { display: none; }
   </style>
 </head>

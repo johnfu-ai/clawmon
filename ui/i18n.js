@@ -46,8 +46,10 @@ const T = {
   "foot.bad": ["WSL 连接异常", "WSL connection error"],
   "foot.fail": ["查询失败", "Query failed"],
 
-  /* session rows — green = no action needed, yellow = awaiting the user */
-  "sum": ["● {g} 正常 · ● {y} 等待输入 · ● {r} 超时", "● {g} OK · ● {y} awaiting input · ● {r} stuck"],
+  /* session rows — green = no action needed, blue = turn complete,
+     yellow = blocked on the user */
+  "sum": ["● {g} 正常 · ● {b} 已完成 · ● {y} 待你输入 · ● {r} 超时",
+    "● {g} OK · ● {b} done · ● {y} awaiting you · ● {r} stuck"],
   /* the engine's classification tags (SessionView.reason, snake_case) —
      keying on the tag keeps the vocabulary owned by the state machine that
      produces it; a forgotten entry shows the raw key instead of the wrong
@@ -57,6 +59,7 @@ const T = {
   "reason.transcript_stale": ["记录未就绪", "Transcript not ready"],
   "reason.tool_running": ["工具运行中", "Tool running"],
   "reason.waiting_subagent": ["等待 Subagent", "Waiting for subagent"],
+  "reason.turn_complete": ["回合完成", "Turn complete"],
   "reason.waiting_input": ["等待输入", "Waiting for input"],
   "reason.waiting_response": ["等待 API 响应", "Waiting for API"],
   "reason.response_timed_out": ["疑似 API 超时", "Likely API timeout"],
@@ -91,6 +94,7 @@ const T = {
 
   /* pet (pet.js loads this same table) */
   "pet.green": ["一切正常", "All good"],
+  "pet.blue": ["有会话已完成回合", "A session finished its turn"],
   "pet.yellow": ["有会话在等你输入", "Sessions awaiting your input"],
   "pet.red": ["有会话疑似卡死", "Session may be stuck"],
   "pet.off": ["WSL 连接异常", "WSL unreachable"],

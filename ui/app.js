@@ -74,7 +74,7 @@ function render(sessions, warning) {
   }
   empty.classList.add("hidden");
 
-  const counts = { green: 0, yellow: 0, red: 0 };
+  const counts = { green: 0, blue: 0, yellow: 0, red: 0 };
   for (const s of sessions) counts[s.state]++;
 
   list.innerHTML = sessions.map((s) => {
@@ -136,6 +136,7 @@ function render(sessions, warning) {
 
   $("summary").textContent = t("sum", {
     g: counts.green,
+    b: counts.blue,
     y: counts.yellow,
     r: counts.red,
   });
@@ -144,7 +145,7 @@ function render(sessions, warning) {
   }
 }
 
-const LIGHTS = ["green", "yellow", "red"];
+const LIGHTS = ["green", "blue", "yellow", "red"];
 
 /* ---------- GLM plan usage chip ---------- */
 
