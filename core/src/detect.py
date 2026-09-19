@@ -73,12 +73,135 @@ def is_interactive_tty(tty):
     that ignores SIGHUP (typical of node, which Claude Code is) keeps
     running; its fd 0 then reads as `/dev/pts/N (deleted)`. A prefix
     match alone would keep listing that ghost as a session.
+
+    A second ghost shape is handled separately (`orphaned_wsl_starts`):
+    Windows Terminal closes the tab but WSL's Relay keeps the master
+    open, so the slave pts still exists. The leftover `wsl.exe` then
+    holds only a 0x0 PseudoConsoleWindow — see `collect` pass 1c.
     """
     if not tty or " (deleted)" in tty:
         return False
     if not tty.startswith(("/dev/pts/", "/dev/tty", "/dev/console")):
         return False
     return os.path.exists(tty)
+
+
+def read_comm(pid):
+    try:
+        with open("/proc/%d/comm" % pid) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def session_leader_start(pid):
+    """Start epoch of the WSL SessionLeader that owns `pid`, if any.
+
+    Used to pair a Linux session with the Windows `wsl.exe` that spawned
+    it (their start times land within a second). Falls back to `pid`'s
+    own start when this is not a WSL login tree.
+    """
+    born = proc_start_epoch(pid)
+    seen = set()
+    cur = pid
+    for _ in range(64):
+        if read_comm(cur).startswith("SessionLeader"):
+            return proc_start_epoch(cur) or born
+        st = read_status(cur)
+        pp = st.get("PPid")
+        if not pp or not pp.isdigit():
+            break
+        pp = int(pp)
+        if pp <= 1 or pp in seen:
+            break
+        seen.add(pp)
+        cur = pp
+    return born
+
+
+# Closing a Windows Terminal tab often leaves `wsl.exe` holding a 0x0
+# PseudoConsoleWindow while the Linux process (node ignores SIGHUP) and
+# the WSL Relay keep the pts alive. Match those leftovers by start time.
+# A live WT tab's wsl.exe has handle 0 (the window is on WindowsTerminal)
+# and must not be treated as orphaned.
+_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+_ORPHAN_SLOP_SECS = 5
+_ORPHAN_TTL_SECS = 15
+_orphan_cache = {"at": 0.0, "starts": None}
+
+_ORPHAN_PS = r"""
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class ClawmonCon {
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  public struct RECT { public int L,T,R,B; }
+}
+"@
+Get-Process wsl -ErrorAction SilentlyContinue | ForEach-Object {
+  $h = $_.MainWindowHandle
+  if ($h -eq [IntPtr]::Zero) { return }
+  $r = New-Object ClawmonCon+RECT
+  [void][ClawmonCon]::GetWindowRect($h, [ref]$r)
+  $c = New-Object Text.StringBuilder 64
+  [void][ClawmonCon]::GetClassName($h, $c, 64)
+  if ($c.ToString() -eq 'PseudoConsoleWindow' -and ($r.R - $r.L) -eq 0 -and ($r.B - $r.T) -eq 0) {
+    ([DateTimeOffset]$_.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
+  }
+}
+"""
+
+
+def matches_orphaned_console(born, orphaned, slop=_ORPHAN_SLOP_SECS):
+    """True when `born` is a WSL SessionLeader start for a closed tab."""
+    if born is None or not orphaned:
+        return False
+    for o in orphaned:
+        if abs(born - o) <= slop:
+            return True
+    return False
+
+
+def orphaned_wsl_starts():
+    """Epoch seconds of leftover `wsl.exe` 0x0 PseudoConsole windows.
+
+    Empty when Windows is unreachable (CI, no interop) — we then only
+    have the `(deleted)` pts check. Cached so a poll does not pay a
+    fresh powershell boot every time.
+    """
+    now = time.time()
+    if _orphan_cache["starts"] is not None \
+            and now - _orphan_cache["at"] < _ORPHAN_TTL_SECS:
+        return _orphan_cache["starts"]
+    starts = _query_orphaned_wsl_starts()
+    _orphan_cache["at"] = now
+    _orphan_cache["starts"] = starts
+    return starts
+
+
+def _query_orphaned_wsl_starts():
+    if not os.path.isfile(_POWERSHELL):
+        return []
+    try:
+        out = subprocess.run(
+            [_POWERSHELL, "-NoProfile", "-Command", _ORPHAN_PS],
+            capture_output=True, text=True, timeout=8)
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    starts = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            starts.append(float(line))
+        except ValueError:
+            continue
+    return starts
 
 
 def is_claude(cmd):
@@ -429,19 +552,89 @@ def final_marker_tail(path):
 
 # Conversation entries we classify on. Claude Code appends timestamped
 # `system` records after a finished turn (`turn_duration`, hook summaries);
-# those must not hide the assistant/user entry classify actually needs.
+# those must not hide the assistant/user entry classify actually needs, but
+# they ARE the only trustworthy "this turn is over" signal — a trailing
+# assistant text block is often just a status line before the next think
+# or tool_use.
 _TURN_TYPES = ("user", "assistant")
+_TURN_TRAILERS = ("turn_duration", "stop_hook_summary")
+
+# Usage-quota 429s (5-hour window, weekly, …) are written as a synthetic
+# assistant record plus a turn_duration trailer. The trailer would make
+# classify treat them as a finished turn; the markers below are the
+# difference between "done" and "paused until the window resets".
+_USAGE_LIMIT_MARKERS = ("使用上限", "usage quota", "usage limit")
+_RESET_AT = re.compile(
+    r"(?:限额将在|reset at)\s+"
+    r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})"
+    r"(?:\s+([+-]\d{4}))?",
+    re.I,
+)
+
+
+def _blocks_text(content):
+    """Join text blocks from a message.content list."""
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "text":
+            t = (b.get("text") or "").strip()
+            if t:
+                parts.append(t)
+    return "\n".join(parts)
+
+
+def parse_usage_limit(entry, text):
+    """Return (usage_limited, resume_at_epoch_or_None) for a quota 429.
+
+    Naive reset stamps (Chinese: `限额将在 2026-09-19 16:21:07 重置`) are
+    local time — detect.py runs on the same machine that printed them.
+    An offset (`+0800`) is taken as-is so English errors stay TZ-stable.
+    """
+    if not text:
+        return False, None
+    is_api_err = (
+        bool(entry.get("isApiErrorMessage"))
+        or entry.get("error") == "rate_limit"
+        or entry.get("apiErrorStatus") == 429
+        or text.lstrip().startswith("API Error:")
+    )
+    if not is_api_err or not any(m in text for m in _USAGE_LIMIT_MARKERS):
+        return False, None
+    resume_at = None
+    m = _RESET_AT.search(text)
+    if m:
+        stamp, tz = m.group(1), m.group(2)
+        try:
+            if tz:
+                dt = datetime.strptime(
+                    stamp + " " + tz, "%Y-%m-%d %H:%M:%S %z")
+            else:
+                dt = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+            resume_at = int(dt.timestamp())
+        except ValueError:
+            resume_at = None
+    return True, resume_at
 
 
 def last_entry(path):
     """Parse the last complete JSON line of the transcript.
 
     Returns dict with type, timestamp, session_id, preview, tool_running,
-    tool_name. `tool_running` is True when the last timestamped *turn* entry
-    is an assistant message containing a tool_use block — the tool result is
+    tool_name, turn_complete, thinking, usage_limited, resume_at.
+    `tool_running` is True when the last timestamped *turn* entry is an
+    assistant message containing a tool_use block — the tool result is
     only appended when the tool finishes, so this is exactly "a tool is
-    executing now"; `tool_name` is that block's tool. Trailing `system`
-    bookkeeping is skipped.
+    executing now"; `tool_name` is that block's tool. `turn_complete` is
+    True when a `turn_duration` / `stop_hook_summary` follows that turn
+    (the turn really ended). `thinking` is True when the last turn is an
+    assistant message that holds only a thinking block — the model is
+    still generating, not waiting on the user. Trailing `system`
+    bookkeeping is skipped for `type` but recorded as the trailer.
+    `usage_limited` is True when that last turn is a usage-quota 429
+    (Claude Code still writes a trailer, but the goal is paused until
+    reset); `resume_at` is the parsed reset epoch, or None.
     """
     try:
         tail = read_tail(path)
@@ -451,8 +644,10 @@ def last_entry(path):
     entry = None
     session_id = None
     preview = ""
-    # walk from the end; keep the last user/assistant line as the entry,
-    # and also grab the nearest assistant text for a preview
+    turn_complete = False
+    # walk from the end; trailers after the last turn mean it finished.
+    # Keep the last user/assistant line as the entry, and also grab the
+    # nearest assistant text for a preview.
     for line in reversed(lines):
         line = line.strip()
         if not line.startswith("{"):
@@ -463,6 +658,10 @@ def last_entry(path):
             continue
         if session_id is None:
             session_id = d.get("sessionId") or d.get("session_id")
+        if entry is None and d.get("type") == "system" \
+                and d.get("subtype") in _TURN_TRAILERS:
+            turn_complete = True
+            continue
         if entry is None and d.get("type") in _TURN_TYPES and "timestamp" in d:
             entry = d
         if not preview and d.get("type") == "assistant":
@@ -472,7 +671,7 @@ def last_entry(path):
                 if isinstance(block, dict) and block.get("type") == "text" \
                         and block.get("text", "").strip():
                     preview = block["text"].strip().replace("\n", " ") \
-                        .replace("\r", " ")[:100]
+                        .replace("\r", " ")[:160]
                     break
         if entry is not None and preview:
             break
@@ -480,14 +679,29 @@ def last_entry(path):
         return None
     tool_running = False
     tool_name = ""
+    thinking = False
     if entry.get("type") == "assistant":
         content = (entry.get("message") or {}).get("content") or []
+        has_text = False
+        has_thinking = False
         if isinstance(content, list):
             for b in content:
-                if isinstance(b, dict) and b.get("type") == "tool_use":
+                if not isinstance(b, dict):
+                    continue
+                kind = b.get("type")
+                if kind == "tool_use":
                     tool_running = True
                     tool_name = str(b.get("name") or "")
                     break
+                if kind == "text" and b.get("text", "").strip():
+                    has_text = True
+                if kind == "thinking":
+                    has_thinking = True
+        thinking = (not tool_running) and has_thinking and not has_text
+    usage_limited, resume_at = False, None
+    if entry.get("type") == "assistant":
+        full = _blocks_text((entry.get("message") or {}).get("content") or [])
+        usage_limited, resume_at = parse_usage_limit(entry, full)
     return {
         "type": entry.get("type", ""),
         "timestamp": entry.get("timestamp", ""),
@@ -495,6 +709,10 @@ def last_entry(path):
         "preview": preview,
         "tool_running": tool_running,
         "tool_name": tool_name,
+        "turn_complete": turn_complete,
+        "thinking": thinking,
+        "usage_limited": usage_limited,
+        "resume_at": resume_at,
     }
 
 
@@ -655,6 +873,18 @@ def collect():
         and is_interactive_tty(p["tty"])
     ]
 
+    # pass 1c: drop sessions whose Windows console is a leftover 0x0
+    # PseudoConsole (WT tab closed; node ignored SIGHUP; Relay kept the
+    # pts so pass 1b still sees an interactive tty). tmux sessions stay
+    # — the user can reattach. Fail-open when Windows is unreachable.
+    orphaned = orphaned_wsl_starts()
+    if orphaned:
+        procs = [
+            p for p in procs
+            if p["tmux"] or not matches_orphaned_console(
+                session_leader_start(p["pid"]), orphaned)
+        ]
+
     # pass 2: one transcript per process (concurrent sessions don't share)
     transcripts = assign_transcripts(procs)
 
@@ -673,7 +903,11 @@ def collect():
             "preview": "",
             "tool_running": False,
             "tool_name": "",
+            "turn_complete": False,
+            "thinking": False,
             "transcript_live": False,
+            "usage_limited": False,
+            "resume_at": None,
             "usage": None,
         }
         transcript = info["transcript"]
@@ -688,10 +922,25 @@ def collect():
                 info["preview"] = le["preview"]
                 info["tool_running"] = le["tool_running"]
                 info["tool_name"] = le["tool_name"]
+                info["turn_complete"] = bool(le.get("turn_complete"))
+                info["thinking"] = bool(le.get("thinking"))
+                info["usage_limited"] = bool(le.get("usage_limited"))
+                resume_at = le.get("resume_at")
+                info["resume_at"] = int(resume_at) if resume_at is not None else None
                 ts = parse_ts(le["timestamp"])
                 if ts is not None:
                     info["idle_sec"] = max(
                         0, int(time_now.timestamp() - ts))
+            # last_entry can miss (huge mid-write line, only trailers in
+            # the window). File mtime still tells us the session is live —
+            # leaving idle_sec None made classify treat it as "waiting for
+            # input" (yellow) while claude was still working.
+            if info["idle_sec"] is None:
+                try:
+                    info["idle_sec"] = max(
+                        0, int(time_now.timestamp() - os.path.getmtime(transcript)))
+                except OSError:
+                    pass
             try:
                 info["usage"] = transcript_usage(transcript)
             except Exception:

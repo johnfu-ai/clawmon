@@ -45,11 +45,19 @@ was deliberately removed (2026-09-13, user decision) — do not reintroduce it.
 - The poll loop lives in the Rust backend, never in WebView JS: WebView2
   throttles hidden-window timers, and monitoring must survive tray/pet mode.
 - Light semantics (2026-09-19, user decision): green means "no user action
-  needed" (active, waiting on the API, a running tool, a subagent); blue
-  means the turn completed and claude awaits the next instruction; yellow
-  means blocked on the user mid-flight (parked AskUserQuestion) or cannot
-  tell; red stays exclusively the auto-continue timeout. Extending green is
-  legitimate only when the wait provably does not need the user.
+  needed" (active, waiting on the API, a running tool, a subagent, or a
+  thinking-only / mid-turn assistant record with no turn trailer); blue
+  means the turn completed (`turn_duration` / `stop_hook_summary` after the
+  last turn, or the idle-window fallback) and claude awaits the next
+  instruction; yellow means blocked on the user mid-flight (parked
+  AskUserQuestion) or cannot tell (no/stale transcript); red is the
+  auto-continue case — a user prompt unanswered past the timeout, **or** a
+  usage-limit 429 (Claude Code still writes a turn trailer for those; do
+  not paint them blue). First send waits for the reset timestamp parsed
+  from the error (`限额将在 … 重置` / `It will reset at …`), not a fresh
+  `wait_secs` window. Extending green is legitimate only when the wait
+  provably does not need the user. A 30s idle heuristic is not that proof
+  — models think longer than that after a status sentence.
 - Detections that cannot be trusted (no/old transcript) must stay yellow:
   the cost of a false red is pressing Enter in an unrelated terminal.
 - The resident detector (`detect.py --serve`) must degrade to the one-shot

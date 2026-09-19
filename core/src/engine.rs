@@ -41,6 +41,9 @@ pub enum Reason {
     /// waiting on the API, which needs no user action however long it takes
     WaitingResponse,
     ResponseTimedOut,
+    /// a 5-hour (or similar) usage-limit 429 paused the goal; auto-continue
+    /// waits for the reset timestamp parsed from the error, then sends Enter
+    UsageLimited,
 }
 
 /// What happened to a session between two polls — the hooks the shell layer
@@ -154,13 +157,6 @@ pub fn state_counts(sessions: &[SessionView]) -> StatusCounts {
     c
 }
 
-/// How long a trailing assistant message (no pending tool) must remain the
-/// last entry before the turn is called complete. Transcript records land
-/// per streamed block, seconds apart, so this only covers "one more block
-/// still on the wire" — the full active window would keep a finished turn
-/// on "running" for minutes (never larger than the active window either).
-const TURN_COMPLETE_GRACE_SECS: i64 = 30;
-
 pub struct Engine {
     tracked: HashMap<i32, Tracked>,
     last_snapshot: Vec<RawSession>,
@@ -169,6 +165,11 @@ pub struct Engine {
     /// math uses this so tests with synthetic timestamps stay consistent
     last_now: i64,
 }
+
+/// Seconds after the parsed usage-window reset before the first Enter.
+/// The error's clock is second-precise; sending on the exact second still
+/// 429s, and one poll interval is not a reliable buffer.
+const USAGE_LIMIT_GRACE_SECS: i64 = 30;
 
 fn basename(p: &str) -> String {
     let p = p.trim_end_matches('/');
@@ -182,8 +183,9 @@ fn basename(p: &str) -> String {
 /// waiting on the API, or waiting on a tool/subagent. Blue means the turn
 /// completed and claude awaits the next instruction: done, not asking anything.
 /// Yellow means the session is blocked on the user mid-flight, or we cannot
-/// tell what it is waiting for. Red stays exclusively the auto-continue case:
-/// a user prompt that has gone unanswered past the timeout.
+/// tell what it is waiting for. Red is the auto-continue case: a user prompt
+/// that has gone unanswered past the timeout, or a usage-limit 429 whose
+/// reset we will wait out (Claude Code still writes a turn trailer for those).
 fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     let idle = s.idle_sec.unwrap_or(i64::MAX);
     // Without a transcript we can vouch for, "idle for six hours" means
@@ -198,13 +200,24 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     if !s.transcript_live {
         return (SessionState::Yellow, Reason::TranscriptStale);
     }
-    // claude spoke last and no tool is pending: structurally the end of a
-    // turn, and the blue light must not wait out the full active window —
-    // a finished turn showed "running" for two minutes otherwise. The grace
-    // only covers one more streamed block still landing (records arrive per
-    // block, seconds apart).
-    let grace = TURN_COMPLETE_GRACE_SECS.min(st.idle_green_secs);
-    if s.last_type == "assistant" && !s.tool_running && idle >= grace {
+    // A usage-quota 429 is a synthetic assistant record with a turn trailer,
+    // so the finished-turn check below would paint it blue. It is the
+    // auto-continue case — red as soon as we can trust the transcript.
+    if s.usage_limited {
+        return (SessionState::Red, Reason::UsageLimited);
+    }
+    // Still generating a thought: the last assistant record is only a
+    // thinking block. That can outlast every idle window and needs no user.
+    // A trailer after it means the turn actually ended — don't hide that.
+    if s.thinking && !s.turn_complete {
+        return (SessionState::Green, Reason::Active);
+    }
+    // Claude Code appends a timestamped `turn_duration` / `stop_hook_summary`
+    // after a finished turn. That is the only signal that the assistant
+    // text is the end of the turn rather than a mid-flight status line
+    // before the next think or tool_use. A 30s idle heuristic flipped blue
+    // (and the fallback flipped yellow) while the model was still working.
+    if s.last_type == "assistant" && !s.tool_running && s.turn_complete {
         return (SessionState::Blue, Reason::TurnComplete);
     }
     // transcript activity within the green window → actively working
@@ -228,9 +241,7 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
         return (SessionState::Green, Reason::ToolRunning);
     }
     // only a trailing *user* prompt is "waiting on the API" — slow is not
-    // stuck, so green until the timeout window says otherwise. A `system`
-    // record after a finished reply (`turn_duration`, hook summary) is
-    // bookkeeping — treating it as a hang would go red and press Enter.
+    // stuck, so green until the timeout window says otherwise.
     if s.last_type == "user" {
         if idle >= st.blocked_after_secs {
             (SessionState::Red, Reason::ResponseTimedOut)
@@ -238,7 +249,12 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
             (SessionState::Green, Reason::WaitingResponse)
         }
     } else {
-        (SessionState::Yellow, Reason::WaitingInput)
+        // assistant without a trailer, or a bookkeeping last_type we could
+        // not classify: past the active window this looks finished, not a
+        // mid-flight ask. Yellow stays AskUserQuestion / cannot-tell
+        // (no or stale transcript) only — labeling this "waiting for input"
+        // was the false yellow while claude was still running.
+        (SessionState::Blue, Reason::TurnComplete)
     }
 }
 
@@ -354,7 +370,13 @@ impl Engine {
                     Countdown::Capped { sends: t.sends }
                 } else {
                     let next_at = if t.sends == 0 {
-                        t.blocked_since.unwrap_or(now) + settings.wait_secs as i64
+                        match s.resume_at {
+                            // the error told us when the window reopens —
+                            // sitting through another full wait_secs (5h)
+                            // would miss a reset that is 90 minutes away
+                            Some(at) => at + USAGE_LIMIT_GRACE_SECS,
+                            None => t.blocked_since.unwrap_or(now) + settings.wait_secs as i64,
+                        }
                     } else {
                         t.last_send_at.unwrap_or(now) + settings.retry_interval_secs as i64
                     };
@@ -466,7 +488,11 @@ mod tests {
             usage: None,
             tool_running: false,
             tool_name: String::new(),
+            turn_complete: false,
+            thinking: false,
             transcript_live: true,
+            usage_limited: false,
+            resume_at: None,
         }
     }
 
@@ -566,42 +592,80 @@ mod tests {
     fn completed_turn_is_blue() {
         let st = Settings::default();
         let mut e = Engine::new();
-        let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 300)]), &st);
+        let mut s = session(1, "assistant", 300);
+        s.turn_complete = true;
+        let (v, _, _) = e.update(snap(1000, vec![s]), &st);
         assert_eq!(v[0].state, SessionState::Blue);
         assert_eq!(v[0].reason, Reason::TurnComplete);
     }
 
-    /// The blue light must not wait out the full active window (default
-    /// 120 s): a trailing no-tool assistant message is structurally a
-    /// finished turn, and "running" a minute after completion read as a bug.
-    /// The 30 s grace only bridges blocks still streaming in.
+    /// The turn trailer is the completion signal: blue as soon as it lands,
+    /// without waiting out the active window. A mid-flight assistant status
+    /// line (no trailer) stays green — the model is often still thinking.
     #[test]
-    fn completed_turn_flips_blue_after_the_grace_not_the_active_window() {
+    fn turn_trailer_flips_blue_immediately_mid_turn_stays_green() {
         let st = Settings::default();
         let mut e = Engine::new();
-        // still inside the grace → could be one more block streaming
-        let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 10)]), &st);
+        // mid-turn status line, idle past the old 30 s grace → still running
+        let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 45)]), &st);
         assert_eq!(v[0].state, SessionState::Green);
         assert_eq!(v[0].reason, Reason::Active);
-        // past the grace (30 s) but inside the active window (120 s) → blue
-        let (v, _, _) = e.update(snap(1045, vec![session(1, "assistant", 45)]), &st);
+        // trailer present, even a few seconds after the last text → done
+        let mut done = session(1, "assistant", 5);
+        done.turn_complete = true;
+        let (v, _, _) = e.update(snap(1045, vec![done]), &st);
         assert_eq!(v[0].state, SessionState::Blue);
         assert_eq!(v[0].reason, Reason::TurnComplete);
+    }
+
+    /// Thinking-only assistant records are the model still generating.
+    /// They must stay green however long they last — the 30 s "finished
+    /// turn" heuristic used to flip them yellow/blue while claude worked.
+    #[test]
+    fn thinking_stays_green_past_the_active_window() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 7200);
+        s.thinking = true;
+        let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::Active);
+        assert!(due.is_empty());
+    }
+
+    /// last_entry missed (empty last_type, no idle): the UI showed yellow
+    /// "等待输入" while claude was still running. Past the active window
+    /// this looks finished, not a mid-flight ask — blue, never yellow.
+    #[test]
+    fn unknown_last_type_is_turn_complete_not_waiting_input() {
+        let st = Settings {
+            wait_secs: 0,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut s = session(1, "", 1000);
+        s.idle_sec = None;
+        let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::TurnComplete);
+        assert!(due.is_empty());
+        assert!(v[0].blocked_since.is_none());
     }
 
     /// A finished turn is often followed by timestamped `system` records
     /// (`turn_duration`, hook summaries). Those must not look like a hang
-    /// waiting on the API — false red auto-sends Enter.
+    /// waiting on the API — false red auto-sends Enter — and must not look
+    /// like a mid-flight ask either.
     #[test]
-    fn system_trailer_after_a_turn_is_waiting_input_not_red() {
+    fn system_trailer_after_a_turn_is_complete_not_red() {
         let st = Settings {
             wait_secs: 0,
             ..Default::default()
         };
         let mut e = Engine::new();
         let (v, due, _) = e.update(snap(10_000, vec![session(1, "system", 1000)]), &st);
-        assert_eq!(v[0].state, SessionState::Yellow);
-        assert_eq!(v[0].reason, Reason::WaitingInput);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::TurnComplete);
         assert!(due.is_empty());
         assert!(v[0].blocked_since.is_none());
     }
@@ -955,6 +1019,91 @@ mod tests {
         let mut e2 = Engine::new();
         let (_, _, evs) = e2.update(snap(t0, vec![session(1, "assistant", 10)]), &st);
         assert!(evs.is_empty());
+    }
+
+    /// The 5-hour usage-limit 429 is a synthetic assistant record with a
+    /// turn trailer — the same shape as a finished turn. It is not done:
+    /// claude is paused until the window resets, and Enter after that
+    /// timestamp is the auto-continue this app exists for.
+    #[test]
+    fn usage_limit_is_red_even_when_the_turn_trailer_landed() {
+        let st = Settings {
+            wait_secs: 0,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 300);
+        s.turn_complete = true;
+        s.usage_limited = true;
+        s.resume_at = Some(11_000);
+        s.preview = "API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-09-19 16:21:07 重置。]".into();
+        let (v, due, evs) = e.update(snap(10_000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(v[0].reason, Reason::UsageLimited);
+        assert!(
+            due.is_empty(),
+            "must wait for the parsed reset, not fire because wait_secs=0"
+        );
+        assert_eq!(
+            waiting_remaining(&v[0]),
+            Some(11_000 + USAGE_LIMIT_GRACE_SECS - 10_000)
+        );
+        assert_eq!(evs.len(), 1, "{evs:?}");
+        assert_eq!(evs[0].kind, EventKind::TurnedRed);
+    }
+
+    /// First auto-continue is scheduled at the reset timestamp (plus a
+    /// short grace), not `wait_secs` after we noticed the session. A
+    /// window that has 90 minutes left must not sit through another 5h.
+    #[test]
+    fn usage_limit_auto_continue_fires_after_parsed_reset() {
+        let st = Settings {
+            wait_secs: 5 * 3600,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let limited = |idle| {
+            let mut s = session(1, "assistant", idle);
+            s.turn_complete = true;
+            s.usage_limited = true;
+            s.resume_at = Some(10_000 + 90 * 60);
+            s
+        };
+        let t0 = 10_000;
+        let (v, due, _) = e.update(snap(t0, vec![limited(0)]), &st);
+        assert_eq!(v[0].state, SessionState::Red);
+        assert!(due.is_empty());
+        let remain = waiting_remaining(&v[0]).expect("countdown");
+        assert_eq!(remain, 90 * 60 + USAGE_LIMIT_GRACE_SECS);
+
+        // one second before the grace window — still waiting
+        let fire_at = t0 + remain;
+        let (v, due, _) = e.update(snap(fire_at - 1, vec![limited(remain - 1)]), &st);
+        assert!(due.is_empty());
+        assert_eq!(waiting_remaining(&v[0]), Some(1));
+
+        let (v, due, _) = e.update(snap(fire_at, vec![limited(remain)]), &st);
+        assert_eq!(due, vec![1]);
+        assert_eq!(v[0].sends, 1);
+    }
+
+    /// No parseable reset time: fall back to the configured wait, same
+    /// as a hanging user prompt. Still red, still not "turn complete".
+    #[test]
+    fn usage_limit_without_resume_at_uses_wait_secs() {
+        let st = Settings {
+            wait_secs: 100,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 10);
+        s.turn_complete = true;
+        s.usage_limited = true;
+        let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(v[0].reason, Reason::UsageLimited);
+        assert!(due.is_empty());
+        assert_eq!(waiting_remaining(&v[0]), Some(100));
     }
 
     #[test]

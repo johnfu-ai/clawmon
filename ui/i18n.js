@@ -63,6 +63,7 @@ const T = {
   "reason.waiting_input": ["等待输入", "Waiting for input"],
   "reason.waiting_response": ["等待 API 响应", "Waiting for API"],
   "reason.response_timed_out": ["疑似 API 超时", "Likely API timeout"],
+  "reason.usage_limited": ["额度已用尽", "Usage limit reached"],
   "idle.sec": ["{n} 秒", "{n}s"],
   "idle.min": ["{n} 分钟", "{n} min"],
   "idle.hour": ["{h} 小时 {m} 分", "{h} h {m} min"],

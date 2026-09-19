@@ -47,11 +47,26 @@ pub struct RawSession {
     /// AskUserQuestion means it is waiting on the user's answer
     #[serde(default)]
     pub tool_name: String,
+    /// a `turn_duration` / `stop_hook_summary` follows the last turn — the
+    /// turn really ended, as opposed to a mid-flight assistant status line
+    #[serde(default)]
+    pub turn_complete: bool,
+    /// the last turn is an assistant message that holds only a thinking
+    /// block — the model is still generating, not waiting on the user
+    #[serde(default)]
+    pub thinking: bool,
     /// the transcript was written at or after this process started, so it is
     /// known to belong to it rather than being a stale file the fallback
     /// pairing heuristics handed us. Absent payloads default to trusted.
     #[serde(default = "trusted")]
     pub transcript_live: bool,
+    /// last turn is a synthetic usage-limit 429 (5-hour quota, etc.)
+    #[serde(default)]
+    pub usage_limited: bool,
+    /// epoch seconds when that usage window resets, parsed from the error
+    /// text (`限额将在 … 重置` / `It will reset at …`). None if unknown.
+    #[serde(default)]
+    pub resume_at: Option<i64>,
 }
 
 fn trusted() -> bool {
@@ -195,6 +210,8 @@ mod tests {
                 },
                 "tool_running": false,
                 "tool_name": "",
+                "turn_complete": true,
+                "thinking": false,
                 "transcript_live": true
             }]
         }"#;
@@ -209,6 +226,8 @@ mod tests {
         assert_eq!(u.output, 89_000);
         assert_eq!(u.requests, 42);
         assert!(st.sessions[0].transcript_live);
+        assert!(st.sessions[0].turn_complete);
+        assert!(!st.sessions[0].thinking);
     }
 
     /// An older detector does not send `transcript_live`; treat its records as
@@ -222,6 +241,8 @@ mod tests {
         assert!(st.sessions[0].transcript_live);
         assert!(!st.sessions[0].tool_running);
         assert!(st.sessions[0].tool_name.is_empty());
+        assert!(!st.sessions[0].turn_complete);
+        assert!(!st.sessions[0].thinking);
         assert!(st.sessions[0].usage.is_none());
     }
 
@@ -395,6 +416,107 @@ print(json.dumps(mod.last_entry(path)))
             "{entry}"
         );
         assert_eq!(entry["tool_running"], false);
+        assert_eq!(entry["turn_complete"], true, "{entry}");
+        assert_eq!(entry["thinking"], false, "{entry}");
+    }
+
+    /// A mid-turn assistant status line (text, no tool, no turn trailer)
+    /// must not look finished — the model often thinks for a long time
+    /// before the next tool_use. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_mid_turn_text_is_not_complete() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+detect_path, path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+with open(path, "w") as f:
+    f.write(json.dumps({
+        "type": "assistant", "timestamp": "2026-09-19T06:18:41.791Z",
+        "sessionId": "s1",
+        "message": {"content": [{"type": "text",
+                                 "text": "Menu didn't open. Retrying."}]},
+    }) + "\n")
+print(json.dumps(mod.last_entry(path)))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("sess.jsonl");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let entry: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        assert_eq!(entry["type"], "assistant", "{entry}");
+        assert_eq!(entry["tool_running"], false, "{entry}");
+        assert_eq!(entry["turn_complete"], false, "{entry}");
+        assert_eq!(entry["thinking"], false, "{entry}");
+    }
+
+    /// An assistant record that holds only a thinking block is the model
+    /// still generating — not a finished turn and not a tool wait.
+    /// (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_reports_thinking_only() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+detect_path, path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+with open(path, "w") as f:
+    f.write(json.dumps({
+        "type": "assistant", "timestamp": "2026-09-19T06:16:50.475Z",
+        "sessionId": "s1",
+        "message": {"content": [{"type": "thinking", "thinking": "..."}]},
+    }) + "\n")
+print(json.dumps(mod.last_entry(path)))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("sess.jsonl");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let entry: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        assert_eq!(entry["type"], "assistant", "{entry}");
+        assert_eq!(entry["tool_running"], false, "{entry}");
+        assert_eq!(entry["turn_complete"], false, "{entry}");
+        assert_eq!(entry["thinking"], true, "{entry}");
     }
 
     /// While a subagent runs, the main transcript ends on the assistant
@@ -455,6 +577,119 @@ print(json.dumps(mod.last_entry(path)))
         assert_eq!(entry["type"], "assistant", "{entry}");
         assert_eq!(entry["tool_running"], true, "{entry}");
         assert_eq!(entry["tool_name"], "TaskOutput", "{entry}");
+    }
+
+    /// A 5-hour usage-limit 429 is written as a synthetic assistant record
+    /// plus a `turn_duration` trailer (Claude Code pauses the goal and tells
+    /// the user to send a message after reset). That must not look like a
+    /// finished turn: `last_entry` has to flag the limit and parse the
+    /// reset timestamp so the engine can go red and wait until then.
+    /// (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_reports_usage_limit_and_reset() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+from datetime import datetime, timedelta, timezone
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+def write(name, records):
+    path = os.path.join(work, name)
+    with open(path, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    return path
+
+zh_text = (
+    "API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。"
+    "您的限额将在 2026-09-19 16:21:07 重置。][reqid]"
+)
+en_text = (
+    "API Error: Request rejected (429) · You have exceeded the 5-hour "
+    "usage quota. It will reset at 2026-09-05 12:36:57 +0800 CST."
+)
+zh = write("zh.jsonl", [
+    {"type": "assistant", "timestamp": "2026-09-19T06:52:25.762Z",
+     "sessionId": "s1", "isApiErrorMessage": True, "error": "rate_limit",
+     "apiErrorStatus": 429,
+     "message": {"model": "<synthetic>",
+                 "content": [{"type": "text", "text": zh_text}]}},
+    {"type": "system", "subtype": "informational",
+     "content": "Goal paused · the request was rate limited · send a message to retry",
+     "timestamp": "2026-09-19T06:52:25.764Z", "sessionId": "s1"},
+    {"type": "system", "subtype": "turn_duration",
+     "timestamp": "2026-09-19T06:52:25.772Z", "sessionId": "s1"},
+])
+en = write("en.jsonl", [
+    {"type": "assistant", "timestamp": "2026-09-05T00:27:00.520Z",
+     "sessionId": "s2", "isApiErrorMessage": True, "error": "rate_limit",
+     "apiErrorStatus": 429,
+     "message": {"model": "<synthetic>",
+                 "content": [{"type": "text", "text": en_text}]}},
+])
+done = write("done.jsonl", [
+    {"type": "assistant", "timestamp": "2026-09-14T02:42:31.521Z",
+     "sessionId": "s3",
+     "message": {"content": [{"type": "text", "text": "Done — committed."}]}},
+    {"type": "system", "subtype": "turn_duration",
+     "timestamp": "2026-09-14T02:42:31.546Z", "sessionId": "s3"},
+])
+auth = write("auth.jsonl", [
+    {"type": "assistant", "timestamp": "2026-09-19T06:52:25.762Z",
+     "sessionId": "s4", "isApiErrorMessage": True,
+     "message": {"content": [{"type": "text",
+                              "text": "API Error: 401 unauthorized"}]}},
+])
+zh_e = mod.last_entry(zh)
+en_e = mod.last_entry(en)
+print(json.dumps({
+    "zh": zh_e,
+    "en": en_e,
+    "done": mod.last_entry(done),
+    "auth": mod.last_entry(auth),
+    "zh_expected": int(datetime.strptime(
+        "2026-09-19 16:21:07", "%Y-%m-%d %H:%M:%S").timestamp()),
+    "en_expected": int(datetime(2026, 9, 5, 12, 36, 57,
+        tzinfo=timezone(timedelta(hours=8))).timestamp()),
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("work");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        fs::create_dir(&work).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        let zh = &got["zh"];
+        assert_eq!(zh["type"], "assistant", "{got}");
+        assert_eq!(zh["turn_complete"], true, "{got}");
+        assert_eq!(zh["usage_limited"], true, "{got}");
+        assert_eq!(zh["resume_at"], got["zh_expected"], "{got}");
+        let en = &got["en"];
+        assert_eq!(en["usage_limited"], true, "{got}");
+        assert_eq!(en["resume_at"], got["en_expected"], "{got}");
+        assert_eq!(got["done"]["usage_limited"], false, "{got}");
+        assert!(got["done"]["resume_at"].is_null(), "{got}");
+        assert_eq!(got["auth"]["usage_limited"], false, "{got}");
     }
 
     /// Live smoke test (only meaningful inside WSL).
@@ -989,6 +1224,169 @@ print(json.dumps({
         assert_eq!(
             result["listed_after"], false,
             "a claude whose terminal has been closed must not stay listed: {result}"
+        );
+    }
+
+    /// Matching a WSL SessionLeader start to leftover `wsl.exe` start
+    /// times: within the slop is a closed WT tab; outside it, or with
+    /// an empty leftover list, is not. (No Windows needed.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn orphaned_console_match_uses_start_slop() {
+        const DRIVER: &str = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("clawmon_detect", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(json.dumps({
+    "hit": mod.matches_orphaned_console(100.0, [100.0]),
+    "near": mod.matches_orphaned_console(104.0, [100.0]),
+    "far": mod.matches_orphaned_console(110.0, [100.0]),
+    "empty": mod.matches_orphaned_console(100.0, []),
+    "none": mod.matches_orphaned_console(None, [100.0]),
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([driver.to_str().unwrap(), script.to_str().unwrap()])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let r: serde_json::Value = serde_json::from_slice(&out.stdout).expect("match JSON");
+        assert_eq!(r["hit"], true, "{r}");
+        assert_eq!(r["near"], true, "{r}");
+        assert_eq!(r["far"], false, "{r}");
+        assert_eq!(r["empty"], false, "{r}");
+        assert_eq!(r["none"], false, "{r}");
+    }
+
+    /// Closing a Windows Terminal tab leaves a 0x0 PseudoConsole on
+    /// `wsl.exe` while the Linux pts stays valid — pass 1b cannot see
+    /// it. `collect()` must drop that session once the leftover start
+    /// time is known, and keep it when the leftover list is empty
+    /// (fail-open / live WT tab). Drives a real pts fixture.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn orphaned_pseudo_console_claude_is_not_a_session() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, subprocess, sys, time
+
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+pf = os.path.join(work, "pid")
+subprocess.Popen(
+    ["setsid", "--fork", "bash", "-c",
+     "echo $$ > %s; exec script -qec \"exec -a claude sleep 60\" /dev/null" % pf],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    stdin=subprocess.DEVNULL)
+
+def wait_pid():
+    for _ in range(40):
+        try:
+            with open(pf) as f:
+                return int(f.read().strip())
+        except OSError:
+            time.sleep(0.05)
+    raise RuntimeError("pidfile never appeared")
+
+def children(pid):
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open("/proc/%s/status" % d) as f:
+                for line in f:
+                    if line.startswith("PPid:"):
+                        if int(line.split()[1]) == pid:
+                            out.append(int(d))
+                        break
+        except OSError:
+            pass
+    return out
+
+def listed(pid):
+    return pid in {s["pid"] for s in mod.collect()["sessions"]}
+
+script_pid = wait_pid()
+time.sleep(0.4)
+claude = children(script_pid)[:1]
+alive = bool(claude) and os.path.exists("/proc/%d" % claude[0])
+pid = claude[0] if claude else None
+listed_plain = listed(pid) if pid else None
+
+real_orphaned = mod.orphaned_wsl_starts
+born = mod.session_leader_start(pid) if pid else None
+mod.orphaned_wsl_starts = lambda: [born]
+mod._orphan_cache["starts"] = None
+listed_ghost = listed(pid) if pid else None
+mod.orphaned_wsl_starts = lambda: []
+mod._orphan_cache["starts"] = None
+listed_open = listed(pid) if pid else None
+mod.orphaned_wsl_starts = real_orphaned
+mod._orphan_cache["starts"] = None
+
+for p in [script_pid] + claude:
+    try:
+        os.kill(p, 9)
+    except OSError:
+        pass
+
+print(json.dumps({
+    "alive": alive,
+    "listed_plain": listed_plain,
+    "listed_ghost": listed_ghost,
+    "listed_open": listed_open,
+    "born": born,
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed its verdict");
+        assert_eq!(result["alive"], true, "fixture must be running: {result}");
+        assert_eq!(
+            result["listed_plain"], true,
+            "a live pts-stdin claude must be listed before the leftover match: {result}"
+        );
+        assert_eq!(
+            result["listed_ghost"], false,
+            "a leftover 0x0 PseudoConsole must drop the session: {result}"
+        );
+        assert_eq!(
+            result["listed_open"], true,
+            "an empty leftover list must fail-open: {result}"
         );
     }
 }
