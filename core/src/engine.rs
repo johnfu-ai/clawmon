@@ -154,6 +154,13 @@ pub fn state_counts(sessions: &[SessionView]) -> StatusCounts {
     c
 }
 
+/// How long a trailing assistant message (no pending tool) must remain the
+/// last entry before the turn is called complete. Transcript records land
+/// per streamed block, seconds apart, so this only covers "one more block
+/// still on the wire" — the full active window would keep a finished turn
+/// on "running" for minutes (never larger than the active window either).
+const TURN_COMPLETE_GRACE_SECS: i64 = 30;
+
 pub struct Engine {
     tracked: HashMap<i32, Tracked>,
     last_snapshot: Vec<RawSession>,
@@ -179,10 +186,6 @@ fn basename(p: &str) -> String {
 /// a user prompt that has gone unanswered past the timeout.
 fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     let idle = s.idle_sec.unwrap_or(i64::MAX);
-    // transcript activity within the green window → actively working
-    if idle < st.idle_green_secs {
-        return (SessionState::Green, Reason::Active);
-    }
     // Without a transcript we can vouch for, "idle for six hours" means
     // nothing: either claude has not written anything yet, or the file
     // belongs to a different session. Never call that blocked — the cost of a
@@ -194,6 +197,19 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     }
     if !s.transcript_live {
         return (SessionState::Yellow, Reason::TranscriptStale);
+    }
+    // claude spoke last and no tool is pending: structurally the end of a
+    // turn, and the blue light must not wait out the full active window —
+    // a finished turn showed "running" for two minutes otherwise. The grace
+    // only covers one more streamed block still landing (records arrive per
+    // block, seconds apart).
+    let grace = TURN_COMPLETE_GRACE_SECS.min(st.idle_green_secs);
+    if s.last_type == "assistant" && !s.tool_running && idle >= grace {
+        return (SessionState::Blue, Reason::TurnComplete);
+    }
+    // transcript activity within the green window → actively working
+    if idle < st.idle_green_secs {
+        return (SessionState::Green, Reason::Active);
     }
     // a tool_use block is the last transcript activity: the tool result is
     // only appended when the tool *finishes*, so claude is waiting on
@@ -210,11 +226,6 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
             return (SessionState::Green, Reason::WaitingSubagent);
         }
         return (SessionState::Green, Reason::ToolRunning);
-    }
-    // claude finished its turn: completed work awaiting the next instruction —
-    // its own light, distinct from both "busy" and "asking you something"
-    if s.last_type == "assistant" {
-        return (SessionState::Blue, Reason::TurnComplete);
     }
     // only a trailing *user* prompt is "waiting on the API" — slow is not
     // stuck, so green until the timeout window says otherwise. A `system`
@@ -556,6 +567,24 @@ mod tests {
         let st = Settings::default();
         let mut e = Engine::new();
         let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 300)]), &st);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::TurnComplete);
+    }
+
+    /// The blue light must not wait out the full active window (default
+    /// 120 s): a trailing no-tool assistant message is structurally a
+    /// finished turn, and "running" a minute after completion read as a bug.
+    /// The 30 s grace only bridges blocks still streaming in.
+    #[test]
+    fn completed_turn_flips_blue_after_the_grace_not_the_active_window() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        // still inside the grace → could be one more block streaming
+        let (v, _, _) = e.update(snap(1000, vec![session(1, "assistant", 10)]), &st);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::Active);
+        // past the grace (30 s) but inside the active window (120 s) → blue
+        let (v, _, _) = e.update(snap(1045, vec![session(1, "assistant", 45)]), &st);
         assert_eq!(v[0].state, SessionState::Blue);
         assert_eq!(v[0].reason, Reason::TurnComplete);
     }
