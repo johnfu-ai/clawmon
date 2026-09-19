@@ -43,7 +43,8 @@ pub struct RawSession {
     #[serde(default)]
     pub tool_running: bool,
     /// name of that pending tool_use block ("" when none) — Task/Agent/
-    /// TaskOutput mean claude is waiting on a subagent, not a plain tool
+    /// TaskOutput mean claude is waiting on a subagent, not a plain tool;
+    /// AskUserQuestion means it is waiting on the user's answer
     #[serde(default)]
     pub tool_name: String,
     /// the transcript was written at or after this process started, so it is

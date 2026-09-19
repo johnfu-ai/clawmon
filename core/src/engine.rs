@@ -21,12 +21,18 @@ pub enum Reason {
     Active,
     NoTranscript,
     TranscriptStale,
+    /// a tool_use block is the last transcript activity and its result is
+    /// still pending — claude is waiting on the tool, not on the user
     ToolRunning,
     /// claude is parked on a subagent (Task/Agent spawn or a blocking
     /// TaskOutput poll) — green, because the subagents are the ones
     /// making progress and the wait can outlast any idle window
     WaitingSubagent,
+    /// the session is waiting for the human: the turn ended, or a parked
+    /// AskUserQuestion whose "tool result" IS the user's answer
     WaitingInput,
+    /// the last entry is a user prompt and claude has not answered yet —
+    /// waiting on the API, which needs no user action however long it takes
     WaitingResponse,
     ResponseTimedOut,
 }
@@ -156,6 +162,11 @@ fn basename(p: &str) -> String {
     p.rsplit('/').next().unwrap_or(p).to_string()
 }
 
+/// Light semantics: green means "no user action needed" — claude is working,
+/// waiting on the API, or waiting on a tool/subagent. Yellow means the session
+/// is waiting for the human, or we cannot tell what it is waiting for.
+/// Red stays exclusively the auto-continue case: a user prompt that has gone
+/// unanswered past the timeout.
 fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     let idle = s.idle_sec.unwrap_or(i64::MAX);
     // transcript activity within the green window → actively working
@@ -165,7 +176,9 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     // Without a transcript we can vouch for, "idle for six hours" means
     // nothing: either claude has not written anything yet, or the file
     // belongs to a different session. Never call that blocked — the cost of a
-    // false positive is pressing Enter in an innocent terminal.
+    // false positive is pressing Enter in an innocent terminal — and never
+    // call it healthy either: it may well be parked on the user, so it stays
+    // yellow with every other "cannot tell" case.
     if s.transcript.is_none() {
         return (SessionState::Yellow, Reason::NoTranscript);
     }
@@ -173,29 +186,34 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
         return (SessionState::Yellow, Reason::TranscriptStale);
     }
     // a tool_use block is the last transcript activity: the tool result is
-    // only appended when the tool *finishes*, so claude is legitimately busy
-    // (e.g. a long Bash command) — never blocked. Waiting on a subagent is
-    // its own kind of busy: the subagents write their own transcripts while
-    // this one goes quiet, the wait routinely outlasts every idle window,
-    // and it is forward progress — so green, never "waiting for input".
+    // only appended when the tool *finishes*, so claude is waiting on
+    // something that is not the user — green for a running tool, and green
+    // for a subagent wait too: the subagents write their own transcripts
+    // while this one goes quiet, the wait routinely outlasts every idle
+    // window, and it is forward progress. The one tool whose result IS a
+    // user action is AskUserQuestion — that park is a genuine wait for input.
     if s.tool_running {
+        if s.tool_name == "AskUserQuestion" {
+            return (SessionState::Yellow, Reason::WaitingInput);
+        }
         if matches!(s.tool_name.as_str(), "Task" | "Agent" | "TaskOutput") {
             return (SessionState::Green, Reason::WaitingSubagent);
         }
-        return (SessionState::Yellow, Reason::ToolRunning);
+        return (SessionState::Green, Reason::ToolRunning);
     }
     // claude finished its turn and is waiting for the human
     if s.last_type == "assistant" {
         return (SessionState::Yellow, Reason::WaitingInput);
     }
-    // only a trailing *user* prompt is "waiting on the API". A `system`
+    // only a trailing *user* prompt is "waiting on the API" — slow is not
+    // stuck, so green until the timeout window says otherwise. A `system`
     // record after a finished reply (`turn_duration`, hook summary) is
     // bookkeeping — treating it as a hang would go red and press Enter.
     if s.last_type == "user" {
         if idle >= st.blocked_after_secs {
             (SessionState::Red, Reason::ResponseTimedOut)
         } else {
-            (SessionState::Yellow, Reason::WaitingResponse)
+            (SessionState::Green, Reason::WaitingResponse)
         }
     } else {
         (SessionState::Yellow, Reason::WaitingInput)
@@ -545,12 +563,14 @@ mod tests {
     }
 
     #[test]
-    fn yellow_then_red_when_waiting_on_api() {
+    fn green_then_red_when_waiting_on_api() {
         let st = Settings::default();
         let mut e = Engine::new();
-        // default blocked_after_secs = 300
+        // default blocked_after_secs = 300; waiting on the API needs no user
+        // action, however long it takes — green while merely slow
         let (v, _, _) = e.update(snap(1000, vec![session(1, "user", 240)]), &st);
-        assert_eq!(v[0].state, SessionState::Yellow);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::WaitingResponse);
 
         let (v, _, _) = e.update(snap(1300, vec![session(1, "user", 540)]), &st);
         assert_eq!(v[0].state, SessionState::Red);
@@ -722,9 +742,10 @@ mod tests {
     }
 
     #[test]
-    fn tool_running_never_red() {
+    fn tool_running_is_green() {
         // a long-running tool (assistant entry whose last block is tool_use)
-        // must not be classified as blocked, no matter how long it runs
+        // waits on the tool, not on the user — green, and never blocked, no
+        // matter how long it runs
         let st = Settings {
             wait_secs: 0,
             ..Default::default()
@@ -735,10 +756,26 @@ mod tests {
         s.tool_name = "Bash".into();
         let t0 = 10_000;
         let (v, due, _) = e.update(snap(t0, vec![s]), &st);
-        assert_eq!(v[0].state, SessionState::Yellow);
+        assert_eq!(v[0].state, SessionState::Green);
         assert_eq!(v[0].reason, Reason::ToolRunning);
         assert!(due.is_empty());
         assert!(v[0].blocked_since.is_none());
+    }
+
+    /// A parked AskUserQuestion is the one tool whose result IS a user
+    /// action: waiting on it is waiting for input — yellow, the true
+    /// user-interaction light, not green "tool running".
+    #[test]
+    fn parked_askuserquestion_waits_for_input() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 7200);
+        s.tool_running = true;
+        s.tool_name = "AskUserQuestion".into();
+        let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Yellow);
+        assert_eq!(v[0].reason, Reason::WaitingInput);
+        assert!(due.is_empty());
     }
 
     /// A session parked on "Waiting for task" — the pending tool is a

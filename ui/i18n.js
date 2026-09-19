@@ -46,8 +46,8 @@ const T = {
   "foot.bad": ["WSL 连接异常", "WSL connection error"],
   "foot.fail": ["查询失败", "Query failed"],
 
-  /* session rows */
-  "sum": ["● {g} 运行 · ● {y} 等待 · ● {r} 超时", "● {g} running · ● {y} waiting · ● {r} stuck"],
+  /* session rows — green = no action needed, yellow = awaiting the user */
+  "sum": ["● {g} 正常 · ● {y} 等待输入 · ● {r} 超时", "● {g} OK · ● {y} awaiting input · ● {r} stuck"],
   /* the engine's classification tags (SessionView.reason, snake_case) —
      keying on the tag keeps the vocabulary owned by the state machine that
      produces it; a forgotten entry shows the raw key instead of the wrong
@@ -58,7 +58,7 @@ const T = {
   "reason.tool_running": ["工具运行中", "Tool running"],
   "reason.waiting_subagent": ["等待 Subagent", "Waiting for subagent"],
   "reason.waiting_input": ["等待输入", "Waiting for input"],
-  "reason.waiting_response": ["等待响应", "Waiting for response"],
+  "reason.waiting_response": ["等待 API 响应", "Waiting for API"],
   "reason.response_timed_out": ["疑似 API 超时", "Likely API timeout"],
   "idle.sec": ["{n} 秒", "{n}s"],
   "idle.min": ["{n} 分钟", "{n} min"],
@@ -91,7 +91,7 @@ const T = {
 
   /* pet (pet.js loads this same table) */
   "pet.green": ["一切正常", "All good"],
-  "pet.yellow": ["有会话在等待", "Sessions waiting"],
+  "pet.yellow": ["有会话在等你输入", "Sessions awaiting your input"],
   "pet.red": ["有会话疑似卡死", "Session may be stuck"],
   "pet.off": ["WSL 连接异常", "WSL unreachable"],
   "pet.click": ["点击打开主窗口", "click to open the main window"],

@@ -44,6 +44,11 @@ was deliberately removed (2026-09-13, user decision) — do not reintroduce it.
 
 - The poll loop lives in the Rust backend, never in WebView JS: WebView2
   throttles hidden-window timers, and monitoring must survive tray/pet mode.
+- Light semantics (2026-09-19, user decision): green means "no user action
+  needed" (active, waiting on the API, a running tool, a subagent); yellow
+  means waiting for the human (turn ended, parked AskUserQuestion) or cannot
+  tell; red stays exclusively the auto-continue timeout. Extending green is
+  legitimate only when the wait provably does not need the user.
 - Detections that cannot be trusted (no/old transcript) must stay yellow:
   the cost of a false red is pressing Enter in an unrelated terminal.
 - The resident detector (`detect.py --serve`) must degrade to the one-shot
