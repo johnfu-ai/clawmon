@@ -298,6 +298,11 @@ def first_ts_epoch(path):
 
     A fresh session writes this within seconds of the claude process
     starting, which lets us pair processes to transcript files.
+
+    NOT a birth date: an auto-compact continuation opens with the summarized
+    history carried over, so its first timestamp can predate the file it
+    replaced. Compare content timelines (last_ts_epoch) instead of file
+    order when following a retired transcript.
     """
     if path in _first_ts_cache:
         return _first_ts_cache[path]
@@ -322,6 +327,37 @@ def first_ts_epoch(path):
     except OSError:
         pass
     _first_ts_cache[path] = ts
+    return ts
+
+
+_last_ts_cache = {}
+
+
+def last_ts_epoch(path):
+    """Epoch seconds of the newest timestamped entry, or None.
+
+    Unlike the first timestamp, this moves as the file grows — collect()
+    clears the cache every run.
+    """
+    if path in _last_ts_cache:
+        return _last_ts_cache[path]
+    ts = None
+    try:
+        tail = read_tail(path)
+    except OSError:
+        tail = ""
+    for line in reversed(tail.split("\n")):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            t = json.loads(line).get("timestamp")
+        except Exception:
+            continue
+        if t:
+            ts = parse_ts(t)
+            break
+    _last_ts_cache[path] = ts
     return ts
 
 
@@ -417,35 +453,38 @@ def assign_transcripts(procs):
             free.remove(pick)
             result[p["pid"]] = pick
 
-        # A process outlives its transcript when the user /clears: the
-        # retired file keeps the birth-time evidence that matched it, so
-        # the pass above would pair the process with a closed session
-        # forever — its idle time frozen at the last pre-clear entry. Hand
-        # such processes over to a newer-born unclaimed file, but only
-        # when the retired file actually closed out (trailing untimestamped
-        # marker) and went quiet before the new file was born. Those two
-        # conditions are what keep an idle session from adopting a dead
-        # neighbour's leftover transcript.
+        # A process outlives its transcript when the user /clears or the
+        # context auto-compacts: the retired file keeps the evidence that
+        # matched it, so the pass above would pair the process with a closed
+        # session forever — its idle time frozen at the last pre-retirement
+        # entry (observed live: a finished session stuck on green
+        # "waiting for API" with a growing idle). Hand such processes over
+        # to the unclaimed file that CONTINUES the story: its newest
+        # timestamped entry must postdate the retired file's quiet moment.
+        # Content order, not file birth order — a compact continuation
+        # reopens with backdated summarized history, so comparing first
+        # timestamps rejects the very file that took over. Among candidates
+        # an open file (no close-out marker) beats a retired one, and newer
+        # content wins; the outlives-the-quiet check is what keeps an idle
+        # session from adopting a dead neighbour's leftover transcript.
         for p in group:
             pick = result.get(p["pid"])
             if not pick:
                 continue
-            pick_first = first_ts_epoch(pick)
-            if pick_first is None or not final_marker_tail(pick):
+            if first_ts_epoch(pick) is None or not final_marker_tail(pick):
                 continue
             try:
                 pick_quiet = os.path.getmtime(pick)
             except OSError:
                 continue
-            takeover = None
+            takeover, takeover_key = None, None
             for f in free:
-                f_first = first_ts_epoch(f)
-                if f_first is None or f_first <= pick_first:
-                    continue
-                if pick_quiet > f_first + 60:
-                    continue  # the pick was still live after f was born
-                if takeover is None or f_first > first_ts_epoch(takeover):
-                    takeover = f
+                f_last = last_ts_epoch(f)
+                if f_last is None or f_last < pick_quiet - 5:
+                    continue  # does not outlive the retired file
+                key = (not final_marker_tail(f), f_last)
+                if takeover is None or key > takeover_key:
+                    takeover, takeover_key = f, key
             if takeover is not None:
                 result[p["pid"]] = takeover
                 claimed.add(takeover)
@@ -808,6 +847,9 @@ def collect():
     the ancestor walk of whichever process recycles it later.
     """
     _status_cache.clear()
+    # last timestamps move with every append, so this cache is strictly
+    # per-run (first timestamps are immutable per file and may persist)
+    _last_ts_cache.clear()
     # first timestamps are immutable per transcript file, so this cache may
     # live across scans — but it must not grow without bound
     if len(_first_ts_cache) > 4096:

@@ -961,6 +961,106 @@ print(json.dumps({str(k): os.path.basename(v) if v else None
         );
     }
 
+    /// Regression (observed live 2026-09-25): auto-compact retires the
+    /// transcript with a `cost-state` marker exactly like /clear, and the
+    /// continuation file REOPENS WITH BACKDATED summarized history — its
+    /// first timestamp predates the retired file's. Birth-order pairing
+    /// rejected the real continuation, so a finished session froze forever
+    /// on the dead file (green "waiting for API", idle climbing). The
+    /// takeover must follow content timelines: the candidate's newest
+    /// timestamped entry has to postdate the retired file's quiet moment.
+    /// (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pairing_follows_compact_continuation() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+
+detect_path, root = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+projects = os.path.join(root, "projects")
+mod.CLAUDE_DIR = projects
+ts = mod.parse_ts
+d = os.path.join(projects, "-tmp-x")
+os.makedirs(d)
+
+def write(name, records, mtime):
+    p = os.path.join(d, name)
+    with open(p, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    os.utime(p, (mtime, mtime))
+    return p
+
+def user(t):
+    return {"type": "user", "timestamp": t, "sessionId": "x",
+            "message": {"role": "user", "content": "hi"}}
+
+# born with the process, retired by auto-compact at 13:10
+old = write("old00000-0000-0000-0000-000000000001.jsonl", [
+    user("2026-09-13T13:00:00Z"),
+    {"type": "cost-state", "sessionId": "x"},
+], ts("2026-09-13T13:10:00Z"))
+
+# the continuation: backdated summary starts BEFORE the old file's first
+# entry (the crux), fresh content lands after the retirement, still open
+new = write("new00000-0000-0000-0000-000000000002.jsonl", [
+    {"type": "mode", "sessionId": "new"},
+    user("2026-09-13T12:30:00Z"),
+    {"type": "assistant", "timestamp": "2026-09-13T13:12:00Z",
+     "sessionId": "new",
+     "message": {"content": [{"type": "text", "text": "continuing"}]}},
+], ts("2026-09-13T13:20:00Z"))
+
+# a dead neighbour's leftover that does NOT outlive the retirement
+write("stale00-0000-0000-0000-000000000003.jsonl", [
+    user("2026-09-13T12:00:00Z"),
+], ts("2026-09-13T12:05:00Z"))
+
+procs = [{"pid": 301, "cmd": ["claude"], "cwd": "/tmp/x", "tty": "",
+          "tmux": None, "start": ts("2026-09-13T13:00:05Z")}]
+mapping = mod.assign_transcripts(procs)
+print(json.dumps({
+    "picked": os.path.basename(mapping[301]) if mapping[301] else None,
+    "old_first": mod.first_ts_epoch(old),
+    "new_first": mod.first_ts_epoch(new),
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed its verdict");
+        assert!(
+            result["new_first"].as_f64().unwrap() < result["old_first"].as_f64().unwrap(),
+            "fixture must reproduce the backdated-continuation case: {result}"
+        );
+        assert_eq!(
+            result["picked"], "new00000-0000-0000-0000-000000000002.jsonl",
+            "the process must follow the compact continuation, not the retired file: {result}"
+        );
+    }
+
     /// Regression: child claude processes are not sessions. Plugins and
     /// agent SDKs spawn claude binaries that descend from the real session
     /// with a pipe on stdin — one terminal used to show up as many rows.
