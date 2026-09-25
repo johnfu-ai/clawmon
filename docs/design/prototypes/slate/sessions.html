@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clawmon · 会话 — Slate</title>
+<link rel="stylesheet" href="../_shared/base.css">
+<link rel="stylesheet" href="../_shared/theme-slate.css">
+<script src="../_shared/mock-data.js" defer></script>
+<script src="../_shared/layout.js" defer></script>
+<script src="../_shared/components.js" defer></script>
+</head>
+<body class="t-slate" data-page="sessions">
+<main class="page">
+  <div id="list"></div>
+</main>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('list').innerHTML = Mock.sessions.map(UI.sessionCard).join('');
+
+  // Countdown: local 1s tick between polls; the backend value recalibrates it
+  // (in the product this is driven by Tauri events, never a JS poll loop).
+  setInterval(function () {
+    document.querySelectorAll('.countdown[data-count]').forEach(function (n) {
+      var v = Math.max(0, (+n.dataset.count) - 1);
+      n.dataset.count = v;
+      n.querySelector('.cd').textContent = UI.fmtSec(v);
+      n.classList.toggle('warn', v > 0 && v < 60);
+    });
+  }, 1000);
+
+  document.getElementById('list').addEventListener('click', function (e) {
+    if (e.target.closest('button')) UI.toast('原型演示：立即继续（记账后发送 tmux send-keys）');
+  });
+});
+</script>
+</body>
+</html>

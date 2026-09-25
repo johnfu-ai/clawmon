@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clawmon · UI 风格评选（v2 原型入口）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0e1116; color: #d7dde6;
+    max-width: 980px; margin: 0 auto; padding: 32px 20px 48px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #7b8798; font-size: 12px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .style-card {
+    background: #151b24; border: 1px solid #232c39; border-radius: 10px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .style-card h2 { font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .tagline { color: #7b8798; font-size: 12px; min-height: 36px; }
+  .swatches { display: flex; gap: 6px; }
+  .sw { width: 22px; height: 22px; border-radius: 5px; border: 1px solid rgba(255,255,255,.12); }
+  .pages { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pages a {
+    font-size: 12px; color: #9db8e8; text-decoration: none;
+    border: 1px solid #2a3547; border-radius: 6px; padding: 4px 10px;
+  }
+  .pages a:hover { background: #1c2430; }
+  .note { margin-top: 24px; color: #7b8798; font-size: 12px; line-height: 1.8; }
+  .note a { color: #9db8e8; }
+</style>
+</head>
+<body>
+<h1>clawmon v2 — UI 风格评选</h1>
+<p class="sub">三套设计系统 · 四个页面（会话 / 任务 / 用量 / 设置）· 同一份语义 HTML，仅换主题（策略模式）。建议从「会话」页开始——信息密度最高，最能暴露风格问题。</p>
+
+<div class="grid">
+  <div class="style-card">
+    <h2>A · Slate 深色工具风 <span style="color:#6aa1ff">◇ 演进</span></h2>
+    <div class="swatches">
+      <span class="sw" style="background:#10141a"></span><span class="sw" style="background:#171d26"></span>
+      <span class="sw" style="background:#3ddc84"></span><span class="sw" style="background:#58a6ff"></span>
+      <span class="sw" style="background:#f5c542"></span><span class="sw" style="background:#ff5f56"></span>
+    </div>
+    <p class="tagline">暗夜值守搭档。v0 视觉的体系化演进：深石板 + 状态光晕 + 等宽数字，专业常驻工具。</p>
+    <div class="pages">
+      <a href="slate/sessions.html">会话</a><a href="slate/tasks.html">任务</a>
+      <a href="slate/usage.html">用量</a><a href="slate/settings.html">设置</a>
+    </div>
+  </div>
+
+  <div class="style-card">
+    <h2>B · Paper 浅色简约 <span style="color:#2563eb">◇ 明亮</span></h2>
+    <div class="swatches">
+      <span class="sw" style="background:#f4f6f9"></span><span class="sw" style="background:#ffffff"></span>
+      <span class="sw" style="background:#22c55e"></span><span class="sw" style="background:#3b82f6"></span>
+      <span class="sw" style="background:#f59e0b"></span><span class="sw" style="background:#ef4444"></span>
+    </div>
+    <p class="tagline">白天办公小部件。白卡片浮在浅灰底上，与 Windows 11 浅色环境协调，亲和无威胁感。</p>
+    <div class="pages">
+      <a href="paper/sessions.html">会话</a><a href="paper/tasks.html">任务</a>
+      <a href="paper/usage.html">用量</a><a href="paper/settings.html">设置</a>
+    </div>
+  </div>
+
+  <div class="style-card">
+    <h2>C · CRT 终端复古 <span style="color:#45f882">◇ 磷光</span></h2>
+    <div class="swatches">
+      <span class="sw" style="background:#0a0e0a"></span><span class="sw" style="background:#10160f"></span>
+      <span class="sw" style="background:#45f882"></span><span class="sw" style="background:#52c5ff"></span>
+      <span class="sw" style="background:#ffd447"></span><span class="sw" style="background:#ff5f56"></span>
+    </div>
+    <p class="tagline">终端原住民仪表盘。全等宽、直角、扫描线、`&gt;` 光标——与被监控的 tmux/WSL 视觉同源。</p>
+    <div class="pages">
+      <a href="crt/sessions.html">会话</a><a href="crt/tasks.html">任务</a>
+      <a href="crt/usage.html">用量</a><a href="crt/settings.html">设置</a>
+    </div>
+  </div>
+</div>
+
+<p class="note">
+  评选要点：倒计时等宽数字、四色灯辨识度、meta 行密度、导航高亮方式。可混合选（主题契约支持拆开组合，如 Paper 底 + Slate 灯色）。<br>
+  依据文档：<a href="../../ui-styles.md">风格分析</a> · <a href="../../design-system-slate.md">Slate</a> ·
+  <a href="../../design-system-paper.md">Paper</a> · <a href="../../design-system-crt.md">CRT</a> ·
+  <a href="README.md">原型架构（设计模式说明）</a>
+</p>
+</body>
+</html>

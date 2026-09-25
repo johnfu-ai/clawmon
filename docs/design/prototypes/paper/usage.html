@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clawmon · 用量 — Paper</title>
+<link rel="stylesheet" href="../_shared/base.css">
+<link rel="stylesheet" href="../_shared/theme-paper.css">
+<script src="../_shared/mock-data.js" defer></script>
+<script src="../_shared/layout.js" defer></script>
+<script src="../_shared/components.js" defer></script>
+</head>
+<body class="t-paper" data-page="usage">
+<main class="page">
+  <div class="page-head"><h2>套餐额度</h2><span class="sub" id="q-level"></span></div>
+  <div class="quota-card" id="quotas"></div>
+  <div class="hint" id="q-updated"></div>
+  <div class="page-head"><h2>会话 token 用量</h2><span class="sub">本转录累计 · 悬停看明细</span></div>
+  <div class="card" id="rows"></div>
+</main>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var u = Mock.usage;
+  document.getElementById('q-level').textContent = u.level;
+  document.getElementById('quotas').innerHTML = u.quotas.map(UI.quotaRow).join('');
+  document.getElementById('q-updated').textContent = u.updated;
+  document.getElementById('rows').innerHTML = u.sessionUsage.map(UI.usageRow).join('');
+});
+</script>
+</body>
+</html>

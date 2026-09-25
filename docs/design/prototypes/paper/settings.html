@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clawmon · 设置 — Paper</title>
+<link rel="stylesheet" href="../_shared/base.css">
+<link rel="stylesheet" href="../_shared/theme-paper.css">
+<script src="../_shared/mock-data.js" defer></script>
+<script src="../_shared/layout.js" defer></script>
+<script src="../_shared/components.js" defer></script>
+</head>
+<body class="t-paper" data-page="settings">
+<main class="page">
+  <div class="form-group">
+    <h3>通用</h3>
+    <div class="check-row"><span class="lbl">语言</span>
+      <select style="width:120px"><option selected>中文</option><option>English</option></select></div>
+    <div class="check-row"><span class="lbl">关闭窗口时最小化到托盘</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="field" style="margin:4px 0 0"><label>轮询间隔（秒）</label>
+      <input class="input" type="number" value="5" min="2" max="3600" required style="width:120px"></div>
+  </div>
+
+  <div class="form-group">
+    <h3>状态判定</h3>
+    <div class="grid2">
+      <div class="field"><label>活跃判定（秒）</label>
+        <input class="input" type="number" value="120" min="5" max="86400" required></div>
+      <div class="field"><label>超时判定（秒）</label>
+        <input class="input" type="number" value="300" min="10" max="86400" required></div>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <h3>自动继续</h3>
+    <div class="check-row"><span class="lbl">启用自动继续</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="grid2" style="margin-top:4px">
+      <div class="field"><label>等待时长（小时）</label>
+        <input class="input" type="number" value="5" min="0" max="168" required></div>
+      <div class="field"><label>继续按键</label>
+        <input class="input mono" value="Enter" maxlength="40"></div>
+      <div class="field"><label>最大尝试次数</label>
+        <input class="input" type="number" value="3" min="1" max="100" required></div>
+      <div class="field"><label>重试间隔（分钟）</label>
+        <input class="input" type="number" value="10" min="1" max="1440" required></div>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <h3>通知</h3>
+    <div class="check-row"><span class="lbl">会话变红</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="check-row"><span class="lbl">自行恢复</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="check-row"><span class="lbl">回合结束 / 等待输入</span>
+      <label class="switch"><input type="checkbox"><span class="track"><span class="knob"></span></span></label></div>
+    <div class="check-row"><span class="lbl">会话退出</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="check-row"><span class="lbl">自动继续收据</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="check-row"><span class="lbl">提示音</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+  </div>
+
+  <div class="form-group">
+    <h3>高级</h3>
+    <div class="field"><label>WSL 发行版（留空 = 默认）</label>
+      <input class="input" placeholder="例如 Ubuntu" maxlength="64"></div>
+    <div class="check-row"><span class="lbl">GLM 套餐用量显示</span>
+      <label class="switch"><input type="checkbox" checked><span class="track"><span class="knob"></span></span></label></div>
+    <div class="hint">提示：把 claude 放进 tmux（如 <span class="mono">tmux new -s work</span>）才能自动继续。</div>
+  </div>
+
+  <div class="form-actions">
+    <button class="btn ghost" id="reset">还原默认</button>
+    <button class="btn primary" id="save">保存</button>
+  </div>
+</main>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('save').addEventListener('click', function () {
+    UI.toast('已保存（原型演示）：sanitize 钳制后立即生效并广播');
+  });
+  document.getElementById('reset').addEventListener('click', function () {
+    UI.toast('原型演示：还原默认值');
+  });
+});
+</script>
+</body>
+</html>

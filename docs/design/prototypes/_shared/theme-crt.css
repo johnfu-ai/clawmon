@@ -1,0 +1,107 @@
+/* Theme C — CRT 终端复古（策略实现 3/3）
+ * 全等宽、直角、磷光绿、扫描线。语义 HTML 与其他主题完全相同。 */
+
+:root {
+  --bg: #0a0e0a;
+  --panel: #10160f;
+  --panel-hover: #16211a;
+  --border: #1f2b1f;
+  --text: #b8e6bf;
+  --bright: #e8ffe9;
+  --muted: #5f8a66;
+  --green: #45f882;
+  --blue: #52c5ff;
+  --yellow: #ffd447;
+  --red: #ff5f56;
+  --accent: #45f882;
+  --accent-ink: #04120a;
+  --danger-bg: #2a1414;
+  --danger-ink: #ff8d84;
+  --font-ui: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --radius: 2px;
+  --radius-btn: 2px;
+  --radius-badge: 2px;
+  --radius-dot: 2px;
+  --bar-track: #1a241b;
+  --bar-fill: #45f882;
+}
+
+/* scanlines over everything, never intercept input */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(0, 0, 0, .14) 2px 3px);
+  z-index: 100;
+}
+
+/* topbar */
+.topbar { border-bottom: 1px solid var(--border); }
+.brand { color: var(--bright); letter-spacing: .04em; }
+.brand .gem { color: var(--accent); }
+.chip { border: 1px solid currentColor; }
+.chip.g { color: var(--green); }
+.chip.b { color: var(--blue); }
+.chip.y { color: var(--yellow); }
+.chip.r { color: var(--red); }
+
+/* nav: `> label` with blinking cursor on active */
+.navbar { border-bottom: 1px solid var(--border); }
+.nav-item .ico { display: none; }
+.nav-item::before { content: "> "; color: var(--muted); }
+.nav-item:hover { color: var(--text); background: rgba(69, 248, 130, .05); }
+.nav-item.active { color: var(--bright); }
+.nav-item.active::before { color: var(--accent); }
+.nav-item.active::after { content: "_"; color: var(--accent); animation: cursor 1.2s steps(1) infinite; }
+@keyframes cursor { 50% { opacity: 0; } }
+
+/* banner / toast */
+.banner { background: var(--danger-bg); color: var(--danger-ink); border-bottom: 1px solid rgba(255, 141, 132, .3); }
+.toast { background: var(--panel); box-shadow: 0 0 12px rgba(69, 248, 130, .15); }
+
+/* cards */
+.card:hover { background: var(--panel-hover); }
+.session[data-state="red"] { border-color: rgba(255, 95, 86, .45); }
+
+/* status dots: square phosphor blocks */
+.dot.green  { box-shadow: 0 0 8px rgba(69, 248, 130, .7); }
+.dot.blue   { box-shadow: 0 0 8px rgba(82, 197, 255, .7); }
+.dot.yellow { box-shadow: 0 0 8px rgba(255, 212, 71, .7); }
+.dot.red    { box-shadow: 0 0 8px rgba(255, 95, 86, .8); animation: blockblink 1.2s steps(1) infinite; }
+@keyframes blockblink { 50% { opacity: .3; } }
+
+.countdown { color: var(--bright); }
+.countdown.off { color: var(--muted); }
+.countdown.warn { color: var(--yellow); }
+
+/* buttons */
+.btn { text-transform: uppercase; letter-spacing: .06em; }
+.btn:hover:not(:disabled) { background: var(--panel-hover); border-color: var(--accent); color: var(--bright); }
+.btn.primary { box-shadow: 0 0 10px rgba(69, 248, 130, .35); }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.15); }
+.btn.danger:hover:not(:disabled) { background: rgba(255, 95, 86, .1); border-color: var(--red); }
+
+/* badges */
+.badge { letter-spacing: .08em; }
+.badge.running   { background: rgba(69, 248, 130, .08); }
+.badge.launching { background: rgba(82, 197, 255, .08); }
+.badge.task      { background: rgba(69, 248, 130, .08); }
+
+/* tasks */
+.task.running .task-ico { color: var(--green); }
+.task.finished .task-ico { color: var(--muted); }
+.task-link a { color: var(--accent); }
+
+/* forms */
+.input:focus, select:focus, textarea:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* usage */
+.quota-label .pct { color: var(--bright); }
+.quota-label .pct.warn { color: var(--yellow); }
+.quota-label .pct.crit { color: var(--red); }
+
+/* statusbar */
+.statusbar { border-top: 1px solid var(--border); }
+.foot-dot { box-shadow: 0 0 8px rgba(69, 248, 130, .7); }

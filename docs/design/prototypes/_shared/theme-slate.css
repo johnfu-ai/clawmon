@@ -1,0 +1,91 @@
+/* Theme A — Slate 深色工具风（策略实现 1/3）
+ * Token 契约见 base.css；语义 HTML 不变，仅换皮肤。 */
+
+:root {
+  --bg: #10141a;
+  --panel: #171d26;
+  --panel-hover: #1c2430;
+  --border: #232c39;
+  --text: #d7dde6;
+  --muted: #7b8798;
+  --green: #3ddc84;
+  --blue: #58a6ff;
+  --yellow: #f5c542;
+  --red: #ff5f56;
+  --accent: #6aa1ff;
+  --accent-ink: #0b1220;
+  --danger-bg: #3a2020;
+  --danger-ink: #ffb4a8;
+  --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --radius: 8px;
+  --radius-btn: 6px;
+  --radius-badge: 999px;
+  --radius-dot: 50%;
+  --bar-track: #232c39;
+  --bar-fill: #6aa1ff;
+}
+
+/* topbar */
+.topbar { border-bottom: 1px solid var(--border); }
+.brand .gem { color: var(--accent); }
+.chip { border: 1px solid transparent; }
+.chip.g { color: var(--green);  background: rgba(61, 220, 132, .12); }
+.chip.b { color: var(--blue);   background: rgba(88, 166, 255, .12); }
+.chip.y { color: var(--yellow); background: rgba(245, 197, 66, .12); }
+.chip.r { color: var(--red);    background: rgba(255, 95, 86, .14); }
+
+/* nav */
+.navbar { border-bottom: 1px solid var(--border); }
+.nav-item:hover { color: var(--text); background: rgba(255, 255, 255, .03); }
+.nav-item.active::after {
+  content: "";
+  position: absolute;
+  left: 22%; right: 22%; bottom: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+/* banner / toast */
+.banner { background: var(--danger-bg); color: var(--danger-ink); border-bottom: 1px solid rgba(255, 180, 168, .2); }
+.toast { background: var(--panel); box-shadow: 0 4px 16px rgba(0, 0, 0, .4); }
+
+/* cards */
+.card:hover { background: var(--panel-hover); }
+.session[data-state="red"] { border-color: rgba(255, 95, 86, .35); }
+
+/* status dots: glow is the signal */
+.dot.green  { box-shadow: 0 0 6px rgba(61, 220, 132, .8); }
+.dot.blue   { box-shadow: 0 0 6px rgba(88, 166, 255, .8); }
+.dot.yellow { box-shadow: 0 0 6px rgba(245, 197, 66, .8); }
+.dot.red    { box-shadow: 0 0 6px rgba(255, 95, 86, .9); animation: blink 2s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .35; } }
+
+.countdown { color: var(--text); }
+.countdown.warn { color: var(--yellow); }
+
+/* buttons */
+.btn:hover:not(:disabled) { background: #2a3547; }
+.btn.primary:hover:not(:disabled) { background: #7faeff; }
+.btn.danger:hover:not(:disabled) { background: rgba(255, 95, 86, .12); }
+
+/* badges */
+.badge.running   { background: rgba(61, 220, 132, .08); }
+.badge.launching { background: rgba(88, 166, 255, .08); }
+.badge.task      { background: rgba(106, 161, 255, .08); }
+
+/* tasks */
+.task.running .task-ico { color: var(--green); }
+.task-link a { color: var(--accent); }
+
+/* forms */
+.input:focus, select:focus, textarea:focus { box-shadow: 0 0 0 2px rgba(106, 161, 255, .2); }
+
+/* usage */
+.quota-label .pct.warn { color: var(--yellow); }
+.quota-label .pct.crit { color: var(--red); }
+
+/* statusbar */
+.statusbar { border-top: 1px solid var(--border); }
+.foot-dot { box-shadow: 0 0 6px rgba(61, 220, 132, .8); }

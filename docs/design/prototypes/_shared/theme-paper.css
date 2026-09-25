@@ -1,0 +1,93 @@
+/* Theme B — Paper 浅色简约（策略实现 2/3）
+ * 亮色点 / 深色字双档状态色；白卡片浮在浅灰底上。 */
+
+:root {
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --panel-hover: #f8fafc;
+  --border: #e3e8ef;
+  --text: #1b2533;
+  --muted: #66738a;
+  --green: #22c55e;  --green-ink: #15803d;
+  --blue: #3b82f6;   --blue-ink: #1d4ed8;
+  --yellow: #f59e0b; --yellow-ink: #b45309;
+  --red: #ef4444;    --red-ink: #b91c1c;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --danger-bg: #fef2f2;
+  --danger-ink: #b91c1c;
+  --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  --radius: 10px;
+  --radius-btn: 8px;
+  --radius-badge: 999px;
+  --radius-dot: 50%;
+  --bar-track: #e9edf3;
+  --bar-fill: #3b82f6;
+}
+
+/* topbar */
+.topbar { border-bottom: 1px solid var(--border); background: var(--panel); }
+.brand .gem { color: var(--accent); }
+.chip { background: var(--bg); }
+.chip.g { color: var(--green-ink);  background: rgba(34, 197, 94, .10); }
+.chip.b { color: var(--blue-ink);   background: rgba(59, 130, 246, .10); }
+.chip.y { color: var(--yellow-ink); background: rgba(245, 158, 11, .14); }
+.chip.r { color: var(--red-ink);    background: rgba(239, 68, 68, .10); }
+
+/* nav */
+.navbar { background: var(--panel); border-bottom: 1px solid var(--border); }
+.nav-item:hover { color: var(--text); background: var(--bg); }
+.nav-item.active::after {
+  content: "";
+  position: absolute;
+  left: 22%; right: 22%; bottom: 0;
+  height: 2px;
+  border-radius: 1px 1px 0 0;
+  background: var(--accent);
+}
+
+/* banner / toast */
+.banner { background: var(--danger-bg); color: var(--danger-ink); border-bottom: 1px solid #fecaca; }
+.toast { background: var(--panel); box-shadow: 0 4px 12px rgba(16, 24, 40, .12); }
+
+/* cards float on shadows + border */
+.card { box-shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .10); }
+.card:hover { background: var(--panel-hover); box-shadow: 0 4px 12px rgba(16, 24, 40, .12); }
+.session[data-state="red"] { border-left: 3px solid var(--red); }
+
+/* status dots: ring instead of glow */
+.dot.green  { box-shadow: 0 0 0 2px rgba(34, 197, 94, .25); }
+.dot.blue   { box-shadow: 0 0 0 2px rgba(59, 130, 246, .25); }
+.dot.yellow { box-shadow: 0 0 0 2px rgba(245, 158, 11, .28); }
+.dot.red    { box-shadow: 0 0 0 2px rgba(239, 68, 68, .28); animation: breathe 2s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: .55; } }
+
+.countdown { color: var(--text); }
+.countdown.warn { color: var(--yellow-ink); }
+
+/* buttons */
+.btn { background: var(--panel); }
+.btn:hover:not(:disabled) { background: #f1f5f9; }
+.btn.primary:hover:not(:disabled) { background: #1d4ed8; }
+.btn.danger:hover:not(:disabled) { background: var(--danger-bg); }
+
+/* badges */
+.badge { background: var(--bg); }
+.badge.running   { color: var(--green-ink);  background: rgba(34, 197, 94, .10); border-color: rgba(34, 197, 94, .4); }
+.badge.launching { color: var(--blue-ink);   background: rgba(59, 130, 246, .10); border-color: rgba(59, 130, 246, .4); }
+.badge.task      { color: var(--blue-ink);   background: rgba(37, 99, 235, .08); border-color: rgba(37, 99, 235, .4); }
+
+/* tasks */
+.task.running .task-ico { color: var(--green-ink); }
+.task-link a { color: var(--accent-ink-link, var(--accent)); }
+
+/* forms */
+.input:focus, select:focus, textarea:focus { box-shadow: 0 0 0 3px rgba(37, 99, 235, .15); }
+
+/* usage */
+.quota-label .pct.warn { color: var(--yellow-ink); }
+.quota-label .pct.crit { color: var(--red-ink); }
+
+/* statusbar */
+.statusbar { border-top: 1px solid var(--border); background: var(--panel); }

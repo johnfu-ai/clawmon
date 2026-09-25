@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clawmon · 任务 — Paper</title>
+<link rel="stylesheet" href="../_shared/base.css">
+<link rel="stylesheet" href="../_shared/theme-paper.css">
+<script src="../_shared/mock-data.js" defer></script>
+<script src="../_shared/layout.js" defer></script>
+<script src="../_shared/components.js" defer></script>
+</head>
+<body class="t-paper" data-page="tasks">
+<main class="page">
+  <div class="page-head">
+    <h2>任务清单 <span class="sub" id="task-count"></span></h2>
+    <button class="btn primary" id="new-task">+ 新建</button>
+  </div>
+  <div id="list"></div>
+</main>
+
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <h3>新建任务 <span class="close" id="modal-close">×</span></h3>
+    <div class="field"><label>标题</label><input class="input" id="f-title" placeholder="修复登录 bug" maxlength="64"></div>
+    <div class="field"><label>目录（WSL 绝对路径）</label><input class="input" id="f-cwd" placeholder="~/work/webapp"></div>
+    <div class="field">
+      <label>命令</label>
+      <textarea id="f-cmd" rows="2" placeholder='claude "修复登录重定向"'></textarea>
+      <span class="hint">例：claude "…" · make test · cd &amp;&amp; 多命令</span>
+    </div>
+    <div class="form-actions">
+      <button class="btn ghost" id="f-cancel">取消</button>
+      <button class="btn primary" id="f-save">保存任务</button>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var seq = 100;
+
+  function render() {
+    document.getElementById('task-count').textContent = '（' + Mock.tasks.length + '）';
+    document.getElementById('list').innerHTML = Mock.tasks.map(UI.taskCard).join('');
+  }
+  render();
+
+  // --- new-task modal ---
+  var modal = document.getElementById('modal');
+  function open() { modal.classList.add('show'); document.getElementById('f-title').focus(); }
+  function close() { modal.classList.remove('show'); }
+  document.getElementById('new-task').addEventListener('click', open);
+  document.getElementById('modal-close').addEventListener('click', close);
+  document.getElementById('f-cancel').addEventListener('click', close);
+
+  document.getElementById('f-save').addEventListener('click', function () {
+    var title = document.getElementById('f-title').value.trim();
+    var cwd = document.getElementById('f-cwd').value.trim();
+    var cmd = document.getElementById('f-cmd').value.trim();
+    if (!title || !cwd || !cmd) { UI.toast('标题 / 目录 / 命令均不能为空'); return; }
+    if (cwd[0] !== '/' && cwd[0] !== '~') { UI.toast('目录必须是 WSL 绝对路径（/ 或 ~ 开头）'); return; }
+    Mock.tasks.unshift({ title: title, cwd: cwd, cmd: cmd, status: 'idle', info: '' });
+    render();
+    close();
+    UI.toast('已保存任务（保存宽松：启动时才校验目录存在性）');
+  });
+
+  // --- task actions (prototype simulation of FR10 flows) ---
+  document.getElementById('list').addEventListener('click', function (e) {
+    var btn = e.target.closest('button');
+    if (!btn) return;
+    var card = e.target.closest('.task');
+    var i = Array.prototype.indexOf.call(document.querySelectorAll('#list .task'), card);
+    var t = Mock.tasks[i];
+    var text = btn.textContent;
+
+    if (text === '启动' || text === '再次启动') {
+      t.status = 'launching'; t.info = ''; render();                       // booked before round trip (FR10.2)
+      UI.toast('启动中：tmux new-session -d -s clawmon-task-' + (++seq) + ' …');
+      setTimeout(function () {
+        t.status = 'running'; t.info = '刚刚';                              // confirmed by next poll
+        t.sessState = 'green'; t.sessText = '会话已出现 · 等待首轮检测';
+        render();
+        UI.toast('已在 WSL 拉起，≤2 个轮询周期后会话页可见');
+      }, 1500);
+    } else if (text === '停止') {
+      t.status = 'finished'; t.info = '刚刚'; delete t.sessState; render();
+      UI.toast('tmux kill-session（演示）');
+    } else if (text === '删除') {
+      Mock.tasks.splice(i, 1); render();
+    } else if (text === '打开终端') {
+      UI.toast('原型演示：wt.exe → wsl.exe -- tmux attach -t clawmon-task-' + seq);
+    } else if (text === '编辑') {
+      UI.toast('原型演示：编辑任务');
+    }
+  });
+});
+</script>
+</body>
+</html>
