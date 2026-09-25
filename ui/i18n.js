@@ -90,6 +90,53 @@ const T = {
   "cd.limit": ["已自动继续 {n} 次（已达上限）", "auto-continued {n} times (limit reached)"],
   "cd.disabled": ["已停用自动继续", "auto-continue disabled"],
 
+  /* unified main nav — rendered from one array in app.js, shared by every
+     page; keys live here so a language switch re-renders the nav too */
+  "nav.sessions": ["会话", "Sessions"],
+  "nav.tasks": ["任务", "Tasks"],
+  "nav.usage": ["用量", "Usage"],
+  "nav.settings": ["设置", "Settings"],
+
+  /* tasks page (FR10) */
+  "tasks.title": ["任务", "Task"],
+  "tasks.count": ["（{n}）", "({n})"],
+  "tasks.act.new": ["+ 新建", "+ New"],
+  "tasks.new": ["新建任务", "New task"],
+  "tasks.editing": ["编辑任务", "Edit task"],
+  "tasks.empty.title": ["任务清单为空", "No tasks yet"],
+  "tasks.empty.hint": ["把常用的 claude 任务存成一键启动", "Save your usual claude launches as one-click tasks"],
+  "tasks.status.idle": ["待启动", "Idle"],
+  "tasks.status.launching": ["启动中…", "Launching…"],
+  "tasks.status.running": ["运行中", "Running"],
+  "tasks.status.finished": ["已结束", "Finished"],
+  "tasks.act.launch": ["启动", "Start"],
+  "tasks.act.relaunch": ["再次启动", "Start again"],
+  "tasks.act.stop": ["停止", "Stop"],
+  "tasks.act.edit": ["编辑", "Edit"],
+  "tasks.act.delete": ["删除", "Delete"],
+  "tasks.act.terminal": ["打开终端", "Open terminal"],
+  "tasks.confirm.stop": ["停止该任务的 tmux 会话？", "Stop this task's tmux session?"],
+  "tasks.confirm.delete": ["删除该任务（不影响正在运行的会话）？", "Delete this task (a running session is left alone)?"],
+  "tasks.linked": ["关联会话", "Linked session"],
+  "tasks.view": ["查看 →", "View →"],
+  "tasks.last.run": ["上次 {time}", "last {time}"],
+  "tasks.form.title": ["标题", "Title"],
+  "tasks.form.cwd": ["目录（WSL 绝对路径）", "Directory (WSL absolute path)"],
+  "tasks.form.cwd.bad": ["目录必须是 WSL 绝对路径（/ 或 ~ 开头）", "Directory must be absolute (/ or ~)"],
+  "tasks.form.command": ["命令", "Command"],
+  "tasks.form.hint": ["例：claude \"…\" · make test · 多命令直接换行", "e.g. claude \"…\" · make test"],
+  "tasks.form.save": ["保存任务", "Save task"],
+  "act.cancel": ["取消", "Cancel"],
+  "toast.saved.task": ["任务已保存", "Task saved"],
+
+  /* usage page */
+  "usage.title": ["套餐额度", "Plan quota"],
+  "usage.sessions": ["会话 token 用量", "Session token usage"],
+  "usage.sessions.hint": ["本转录累计", "per transcript"],
+  "usage.win.5h": ["5 小时窗口", "5-hour window"],
+  "usage.win.wk": ["7 天窗口", "7-day window"],
+  "usage.empty": ["未配置 GLM 端点，或已在设置中关闭", "No GLM endpoint, or disabled in settings"],
+
   /* toasts */
   "toast.saved": ["设置已保存", "Settings saved"],
 

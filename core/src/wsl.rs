@@ -147,6 +147,74 @@ pub fn tmux_send_keys(distro: &str, pane: &str, keys: &[&str]) -> Result<(), Str
     run_wsl(distro, &args).map(|_| ())
 }
 
+/// Create a detached tmux session for a task launch (FR10.2). `-c` makes
+/// tmux itself change into the working directory; the command string is
+/// interpreted by the login shell inside WSL — the same trust boundary as
+/// the user typing it. Name and cwd travel as single argv entries.
+pub fn tmux_new_session(distro: &str, name: &str, cwd: &str, command: &str) -> Result<(), String> {
+    run_wsl(
+        distro,
+        &["tmux", "new-session", "-d", "-s", name, "-c", cwd, command],
+    )
+    .map(|_| ())
+}
+
+/// Kill a task's tmux session (the task "stop" button). Killing a session
+/// that is already gone is fine — callers treat that as success.
+pub fn tmux_kill_session(distro: &str, name: &str) -> Result<(), String> {
+    run_wsl(distro, &["tmux", "kill-session", "-t", name]).map(|_| ())
+}
+
+/// Open a visible terminal attached to a tmux session (FR10.4): Windows
+/// Terminal when available, else a windowed wsl.exe console. The terminal
+/// is its own process — clawmon exiting must never close it — so this only
+/// spawns and never waits, and it must NOT use CREATE_NO_WINDOW.
+pub fn open_terminal(distro: &str, session: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
+        let attach = |cmd: &mut Command| {
+            cmd.arg("wsl.exe");
+            if !distro.is_empty() {
+                cmd.arg("-d").arg(distro);
+            }
+            cmd.arg("--").args(["tmux", "attach", "-t", session]);
+        };
+
+        let mut wt = Command::new("wt.exe");
+        attach(&mut wt);
+        if wt
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+
+        let mut wsl = Command::new("wsl.exe");
+        attach(&mut wsl);
+        wsl.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打开终端失败: {e}"))
+    }
+    #[cfg(not(windows))]
+    {
+        // dev/test inside WSL: nothing sensible to open, and monitoring does
+        // not depend on this button — the detached session is already visible
+        // to the detector. Report success so the UI does not nag.
+        let _ = (distro, session);
+        Ok(())
+    }
+}
+
 /// Run a command inside WSL, feeding `input` on stdin.
 /// Used for `python3 -` (script on stdin).
 pub fn run_wsl_stdin(distro: &str, args: &[&str], input: &str) -> Result<String, String> {
@@ -315,6 +383,30 @@ mod tests {
             "child {pid} survived the timeout"
         );
         let _ = std::fs::remove_file(&pidfile);
+    }
+
+    /// Task launch primitives (FR10.2): a detached session appears, and
+    /// killing it makes it vanish. `has-session` for the negative check on
+    /// purpose: killing the last session takes the whole server down with
+    /// it, and `list-sessions` would then fail with "no server running" —
+    /// exactly the state we want to assert as "gone". Linux-only like the
+    /// other live tests — needs a real tmux.
+    #[test]
+    #[cfg(all(test, target_os = "linux"))]
+    fn task_session_lifecycle() {
+        let name = "clawmon-wsl-test-task";
+        let _ = run(&["tmux", "kill-session", "-t", name], 5);
+        tmux_new_session("", name, "/tmp", "sleep 60").expect("new-session");
+        let list = run(&["tmux", "list-sessions", "-F", "#{session_name}"], 5).unwrap();
+        assert!(
+            list.lines().any(|l| l.trim() == name),
+            "task session must be listed: {list}"
+        );
+        tmux_kill_session("", name).expect("kill-session");
+        assert!(
+            run(&["tmux", "has-session", "-t", name], 5).is_err(),
+            "task session must be gone"
+        );
     }
 
     #[test]

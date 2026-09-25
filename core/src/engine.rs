@@ -274,6 +274,12 @@ impl Engine {
         self.last_views.clone()
     }
 
+    /// The raw sessions of the last successful `update` — task views resolve
+    /// their linked claude session from this.
+    pub fn last_snapshot(&self) -> &[RawSession] {
+        &self.last_snapshot
+    }
+
     pub fn get_session(&self, pid: i32) -> Option<&RawSession> {
         self.last_snapshot.iter().find(|s| s.pid == pid)
     }
@@ -501,6 +507,7 @@ mod tests {
             now: String::new(),
             now_epoch: now as f64,
             sessions,
+            tmux_sessions: Vec::new(),
         }
     }
 

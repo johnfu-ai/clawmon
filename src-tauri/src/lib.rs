@@ -1,8 +1,9 @@
 use clawmon_core::{
     engine::{state_counts, SessionView},
     settings::Settings,
+    tasks::{Task, TaskStore, TaskView},
     usage::UsageInfo,
-    wsl::tmux_send_keys,
+    wsl::{open_terminal, tmux_kill_session, tmux_new_session, tmux_send_keys},
     Detector, Engine, EventKind, SessionEvent,
 };
 use std::path::PathBuf;
@@ -31,6 +32,9 @@ struct AppState {
     warning: Mutex<Option<String>>,
     /// Latest plan-quota snapshot from the usage loop below.
     last_usage: Mutex<Option<UsageInfo>>,
+    /// the task list (FR10): definitions + runtime statuses, reconciled
+    /// against every poll's tmux session list
+    tasks: Mutex<TaskStore>,
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -167,6 +171,20 @@ fn settings_path(app: &tauri::AppHandle) -> PathBuf {
         .join("settings.json")
 }
 
+fn tasks_path(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("tasks.json")
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Update the tray tooltip and the desktop pet with the current light counts.
 fn update_status_followers(app: &tauri::AppHandle, sessions: &[SessionView], warning: bool) {
     let mut c = state_counts(sessions);
@@ -188,8 +206,14 @@ fn poll(app: &tauri::AppHandle, detector: &mut Detector) -> u64 {
     let settings = lock(&state.settings).clone();
     let interval = settings.poll_interval_secs;
 
-    let (sessions, warning) = match detector.detect(&settings) {
+    let (sessions, warning, task_views) = match detector.detect(&settings) {
         Ok(snap) => {
+            // the task store links its views to claude sessions and keys its
+            // liveness on the tmux session list — both come from this poll,
+            // so keep a copy before `update` consumes the snapshot
+            let raw_sessions = snap.sessions.clone();
+            let tmux_names = snap.tmux_sessions.clone();
+            let now = snap.now_epoch as i64;
             // `update` counts every attempt it schedules, so sending the keys
             // below cannot be double-booked by a later poll.
             let (views, due, events) = lock(&state.engine).update(snap, &settings);
@@ -224,16 +248,30 @@ fn poll(app: &tauri::AppHandle, detector: &mut Detector) -> u64 {
                     Err(e) => eprintln!("auto-continue 发送失败 pid={pid}: {e}"),
                 }
             }
-            (views, None)
+            // fold the same poll's tmux facts into task statuses (a second
+            // lock, taken only after the engine lock is long gone)
+            let task_views = {
+                let mut store = lock(&state.tasks);
+                store.reconcile(&tmux_names, now);
+                store.views(&raw_sessions)
+            };
+            (views, None, task_views)
         }
         // WSL is unreachable: keep showing the last known sessions rather
-        // than an empty list, and say so in the banner
-        Err(e) => (lock(&state.engine).last_views(), Some(e)),
+        // than an empty list, and say so in the banner. Task statuses keep
+        // their last state — a dead poll proves nothing either way.
+        Err(e) => {
+            let sessions = lock(&state.engine).last_views();
+            let raw = lock(&state.engine).last_snapshot().to_vec();
+            let task_views = lock(&state.tasks).views(&raw);
+            (sessions, Some(e), task_views)
+        }
     };
 
     *lock(&state.warning) = warning.clone();
     update_status_followers(app, &sessions, warning.is_some());
     let _ = app.emit("sessions", StatusResponse { sessions, warning });
+    let _ = app.emit("tasks", task_views);
     interval
 }
 
@@ -395,6 +433,192 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     Ok(lock(&state.settings).clone())
 }
 
+// ---- task list (FR10) -----------------------------------------------------
+//
+// One lock at a time, same rule as everywhere else: engine snapshot out
+// first, drop the guard, then the task store.
+
+/// Push the current task views to the webview.
+fn emit_tasks(app: &tauri::AppHandle, state: &State<'_, AppState>) {
+    let raw = lock(&state.engine).last_snapshot().to_vec();
+    let views = lock(&state.tasks).views(&raw);
+    let _ = app.emit("tasks", views);
+}
+
+#[tauri::command]
+async fn get_tasks(state: State<'_, AppState>) -> Result<Vec<TaskView>, String> {
+    let raw = lock(&state.engine).last_snapshot().to_vec();
+    Ok(lock(&state.tasks).views(&raw))
+}
+
+#[tauri::command]
+async fn add_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+    cwd: String,
+    command: String,
+) -> Result<TaskView, String> {
+    let raw = lock(&state.engine).last_snapshot().to_vec();
+    let view = {
+        let mut store = lock(&state.tasks);
+        let task = store.add(
+            Task {
+                title,
+                cwd,
+                command,
+                ..Default::default()
+            },
+            now_secs(),
+        )?;
+        store.save()?;
+        store
+            .views(&raw)
+            .into_iter()
+            .find(|v| v.id == task.id)
+            .expect("just-added task is in the views")
+    };
+    emit_tasks(&app, &state);
+    Ok(view)
+}
+
+#[tauri::command]
+async fn update_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+    title: String,
+    cwd: String,
+    command: String,
+) -> Result<(), String> {
+    {
+        let mut store = lock(&state.tasks);
+        store.update(
+            id,
+            Task {
+                title,
+                cwd,
+                command,
+                ..Default::default()
+            },
+        )?;
+        store.save()?;
+    }
+    emit_tasks(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+) -> Result<(), String> {
+    {
+        let mut store = lock(&state.tasks);
+        store.remove(id)?;
+        store.save()?;
+    }
+    emit_tasks(&app, &state);
+    Ok(())
+}
+
+/// Launch a task: claim the launch under the store lock (a second click or
+/// a poll mid-round-trip is refused), then run the blocking tmux round trip.
+/// A failed launch lands in `finished` so the button unblocks.
+#[tauri::command]
+async fn launch_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+) -> Result<String, String> {
+    let (distro, lang) = {
+        let s = lock(&state.settings);
+        (s.wsl_distro.clone(), s.language.clone())
+    };
+    let (name, cwd, command) = {
+        let mut store = lock(&state.tasks);
+        let task = store.claim_launch(id, now_secs())?;
+        let _ = store.save(); // lastRunAt survives even an instant-death run
+        (task.session_name(), task.cwd, task.command)
+    };
+    emit_tasks(&app, &state); // "launching" reaches the UI before the trip
+
+    let launch_name = name.clone();
+    let launched = tauri::async_runtime::spawn_blocking(move || {
+        tmux_new_session(&distro, &launch_name, &cwd, &command)
+    })
+    .await
+    .map_err(|e| format!("启动任务失败: {e}"))?;
+
+    match launched {
+        Ok(()) => {
+            emit_tasks(&app, &state);
+            Ok(if lang == "en" {
+                format!("Task started → tmux session {name}")
+            } else {
+                format!("任务已启动 → tmux 会话 {name}")
+            })
+        }
+        Err(e) => {
+            lock(&state.tasks).launch_failed(id, now_secs());
+            emit_tasks(&app, &state);
+            Err(e)
+        }
+    }
+}
+
+/// Stop a task's tmux session. The stop is booked before the kill round
+/// trip (double-click safe); the session dying first is success, not error.
+#[tauri::command]
+async fn stop_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: u64,
+) -> Result<String, String> {
+    let (distro, lang) = {
+        let s = lock(&state.settings);
+        (s.wsl_distro.clone(), s.language.clone())
+    };
+    let name = {
+        let mut store = lock(&state.tasks);
+        let task = store.claim_stop(id, now_secs())?;
+        let _ = store.save();
+        task.session_name()
+    };
+    emit_tasks(&app, &state);
+
+    let kill_name = name.clone();
+    tauri::async_runtime::spawn_blocking(move || tmux_kill_session(&distro, &kill_name))
+        .await
+        .map_err(|e| format!("停止任务失败: {e}"))??;
+    emit_tasks(&app, &state);
+    Ok(if lang == "en" {
+        format!("Task stopped ({name})")
+    } else {
+        format!("任务已停止（{name}）")
+    })
+}
+
+/// Open a visible terminal attached to the task's tmux session (FR10.4).
+/// Spawn-only: the terminal outlives clawmon and monitoring never depends
+/// on it.
+#[tauri::command]
+async fn open_task_terminal(state: State<'_, AppState>, id: u64) -> Result<(), String> {
+    let (distro, name) = {
+        let store = lock(&state.tasks);
+        let task = store
+            .tasks()
+            .iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| format!("任务 {id} 不存在"))?;
+        let name = task.session_name();
+        drop(store);
+        let distro = lock(&state.settings).wsl_distro.clone();
+        (distro, name)
+    };
+    open_terminal(&distro, &name)
+}
 #[tauri::command]
 async fn set_settings(
     app: tauri::AppHandle,
@@ -559,12 +783,14 @@ pub fn run() {
         .setup(|app| {
             let path = settings_path(app.handle());
             let settings = Settings::load(&path);
+            let tasks = TaskStore::load(&tasks_path(app.handle()));
             app.manage(AppState {
                 engine: Mutex::new(Engine::new()),
                 settings: Mutex::new(settings.clone()),
                 settings_path: path,
                 warning: Mutex::new(None),
                 last_usage: Mutex::new(None),
+                tasks: Mutex::new(tasks),
             });
 
             // monitoring starts with the app, not with the window: closing to
@@ -660,7 +886,14 @@ pub fn run() {
             send_continue,
             get_settings,
             set_settings,
-            pet_clicked
+            pet_clicked,
+            get_tasks,
+            add_task,
+            update_task,
+            remove_task,
+            launch_task,
+            stop_task,
+            open_task_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -947,9 +947,13 @@ def collect():
                 info["usage"] = None  # usage must never cost a poll
         sessions.append(info)
     sessions.sort(key=lambda s: s["pid"])
+    # every live tmux session name (not only claude ones): task launches
+    # reconcile their liveness against this list each poll
+    tmux_sessions = sorted({p["session"] for p in panes.values()})
     return {"now": time_now.isoformat(),
             "now_epoch": time_now.timestamp(),
-            "sessions": sessions}
+            "sessions": sessions,
+            "tmux_sessions": tmux_sessions}
 
 
 def emit(scan):

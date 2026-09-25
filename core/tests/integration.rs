@@ -3,7 +3,11 @@
 //! integration -- --ignored`.
 
 use clawmon_core::{
-    detect, engine::Reason, wsl::tmux_send_keys, Engine, SessionState, SessionView, Settings,
+    detect,
+    engine::Reason,
+    tasks::{Task, TaskStatus, TaskStore},
+    wsl::{tmux_kill_session, tmux_new_session, tmux_send_keys},
+    Engine, SessionState, SessionView, Settings,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -307,4 +311,72 @@ fn iso_now_plus(secs: i64) -> String {
         secs_of_day % 3600 / 60,
         secs_of_day % 60
     )
+}
+
+/// FR10 end-to-end: launch a task through the real primitives, let the real
+/// detector report the tmux session list, reconcile the store to running,
+/// then stop and reconcile to finished — the exact sequence the poll loop
+/// runs every pass.
+#[test]
+#[ignore = "requires live WSL/Linux + tmux"]
+fn task_launch_runs_and_finishes() {
+    fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("tasks.json");
+    let mut store = TaskStore::load(&path);
+    let task = store
+        .add(
+            Task {
+                title: "itest sleep".into(),
+                cwd: "/tmp".into(),
+                command: "sleep 60".into(),
+                ..Default::default()
+            },
+            now(),
+        )
+        .expect("add");
+    let name = task.session_name();
+    let _ = tmux_kill_session("", &name); // clean slate
+
+    // claim under the lock, then the round trip — a second claim must refuse
+    let spec = store.claim_launch(task.id, now()).expect("claim");
+    assert_eq!(
+        store.claim_launch(task.id, now()).unwrap_err(),
+        "任务正在启动中",
+        "overlapping launch is absorbed by the claim"
+    );
+    tmux_new_session("", &name, &spec.cwd, &spec.command).expect("launch");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // the real detector reports the task's tmux session; reconcile goes
+    // launching → running exactly as the poll loop does
+    let snap = detect(&Settings::default()).expect("detect");
+    assert!(
+        snap.tmux_sessions.iter().any(|s| s == &name),
+        "detector must list the task session: {:?}",
+        snap.tmux_sessions
+    );
+    store.reconcile(&snap.tmux_sessions, now());
+    assert_eq!(store.status_of(task.id), TaskStatus::Running);
+
+    // stop → session gone → finished
+    store.claim_stop(task.id, now()).expect("stop");
+    tmux_kill_session("", &name).expect("kill");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let snap = detect(&Settings::default()).expect("detect");
+    assert!(!snap.tmux_sessions.iter().any(|s| s == &name));
+    store.reconcile(&snap.tmux_sessions, now());
+    assert_eq!(store.status_of(task.id), TaskStatus::Finished);
+
+    // lastRunAt survives the full trip through disk
+    store.save().unwrap();
+    let reloaded = TaskStore::load(&path);
+    assert_eq!(reloaded.tasks().len(), 1);
+    assert!(reloaded.tasks()[0].last_run_at.is_some());
 }

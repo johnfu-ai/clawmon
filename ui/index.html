@@ -13,23 +13,74 @@
       <span data-i18n="app.title">Claude WSL 监控</span>
       <span id="summary" class="summary"></span>
     </div>
-    <button id="btn-settings" title="设置" aria-label="设置" data-i18n-title="settings.tooltip">⚙</button>
   </header>
+
+  <!-- The unified main nav. Rendered by app.js from one NAV array — no page
+       may add, remove or restyle items; only the active highlight moves.
+       This is the production half of the constraint the prototypes enforced
+       with _shared/layout.js. -->
+  <nav id="nav" aria-label="主导航"></nav>
 
   <div id="banner" class="banner hidden"></div>
 
-  <main id="list">
-    <!-- session rows rendered by app.js -->
+  <main id="page-sessions" class="page">
+    <div id="list">
+      <!-- session rows rendered by app.js -->
+    </div>
+    <div id="empty" class="empty hidden">
+      <div class="empty-icon">⌘</div>
+      <p data-i18n="empty.title">未发现运行中的 Claude Code 会话</p>
+      <p class="hint" data-i18n="empty.hint">在 WSL 终端里启动 claude 即可自动识别</p>
+    </div>
   </main>
 
-  <div id="empty" class="empty hidden">
-    <div class="empty-icon">⌘</div>
-    <p data-i18n="empty.title">未发现运行中的 Claude Code 会话</p>
-    <p class="hint" data-i18n="empty.hint">在 WSL 终端里启动 claude 即可自动识别</p>
-  </div>
+  <main id="page-tasks" class="page hidden">
+    <div class="page-head">
+      <h2 data-i18n="tasks.title">任务清单</h2>
+      <span id="task-count" class="sub"></span>
+      <button id="btn-new-task" class="primary sm" data-i18n="tasks.act.new">+ 新建</button>
+    </div>
+    <div id="task-list"></div>
+    <div id="task-empty" class="empty hidden">
+      <div class="empty-icon">▶</div>
+      <p data-i18n="tasks.empty.title">任务清单为空</p>
+      <p class="hint" data-i18n="tasks.empty.hint">把常用的 claude 任务存成一键启动</p>
+    </div>
 
-  <section id="settings" class="settings hidden">
-    <h2 data-i18n="settings.title">设置</h2>
+    <div id="task-modal" class="modal-backdrop hidden">
+      <div class="modal">
+        <h3><span id="task-modal-title" data-i18n="tasks.new">新建任务</span><span id="task-modal-close" class="close">×</span></h3>
+        <form id="task-form">
+          <label><span data-i18n="tasks.form.title">标题</span>
+            <input type="text" name="title" maxlength="64" required /></label>
+          <label><span data-i18n="tasks.form.cwd">目录（WSL 绝对路径）</span>
+            <input type="text" name="cwd" placeholder="~/work/webapp" required /></label>
+          <label><span data-i18n="tasks.form.command">命令</span>
+            <textarea name="command" rows="2" placeholder='claude "修复登录bug"' required></textarea>
+            <span class="hint" data-i18n="tasks.form.hint">例：claude "…" · make test · 多命令直接换行</span></label>
+          <div class="form-actions">
+            <button type="button" id="task-cancel" data-i18n="act.cancel">取消</button>
+            <button type="submit" class="primary" data-i18n="tasks.form.save">保存任务</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <main id="page-usage" class="page hidden">
+    <div class="page-head">
+      <h2 data-i18n="usage.title">套餐额度</h2>
+      <span id="usage-level" class="sub"></span>
+    </div>
+    <div id="usage-quotas" class="quota-card"></div>
+    <div class="page-head">
+      <h2 data-i18n="usage.sessions">会话 token 用量</h2>
+      <span class="sub" data-i18n="usage.sessions.hint">本转录累计</span>
+    </div>
+    <div id="usage-rows" class="usage-rows"></div>
+  </main>
+
+  <section id="page-settings" class="page hidden">
     <form id="settings-form">
       <label><span data-i18n="set.language">语言 / Language</span>
         <select name="language">
@@ -87,7 +138,6 @@
 
       <div class="settings-actions">
         <button type="submit" class="primary" data-i18n="act.save">保存</button>
-        <button type="button" id="btn-cancel-settings" data-i18n="act.close">关闭</button>
       </div>
     </form>
     <p class="hint"><span data-i18n="hint.tmux1">提示：只有运行在 tmux 里的 Claude Code 才能被自动控制，建议用 </span><code>tmux new -s work</code><span data-i18n="hint.tmux2">后在里面启动 claude。</span></p>

@@ -9,6 +9,7 @@
 pub mod detector;
 pub mod engine;
 pub mod settings;
+pub mod tasks;
 pub mod usage;
 pub mod wsl;
 
@@ -18,4 +19,5 @@ pub use engine::{
     StatusCounts,
 };
 pub use settings::Settings;
+pub use tasks::{Task, TaskStatus, TaskStore, TaskView};
 pub use usage::{parse_usage, query_usage, UsageInfo, UsageLimit};

@@ -100,6 +100,10 @@ pub struct RawStatus {
     pub now: String,
     pub now_epoch: f64,
     pub sessions: Vec<RawSession>,
+    /// names of every live tmux session (not just claude ones) — task
+    /// reconciliation keys on these. Older detectors don't send it.
+    #[serde(default)]
+    pub tmux_sessions: Vec<String>,
 }
 
 /// Run the detection script inside WSL and parse its JSON output.
@@ -193,6 +197,7 @@ mod tests {
         let raw = r#"{
             "now": "2026-09-08T07:30:14.581925+00:00",
             "now_epoch": 1788864614.5,
+            "tmux_sessions": ["work"],
             "sessions": [{
                 "pid": 20447,
                 "cwd": "/home/john/statebar",
@@ -219,6 +224,7 @@ mod tests {
         assert_eq!(st.sessions.len(), 1);
         assert_eq!(st.sessions[0].tmux.as_ref().unwrap().pane, "%0");
         assert_eq!(st.sessions[0].idle_sec, Some(5));
+        assert_eq!(st.tmux_sessions, vec!["work".to_string()]);
         let u = st.sessions[0].usage.expect("usage present");
         assert_eq!(u.input, 1_100_000);
         assert_eq!(u.cache_read, 1_200_000);
@@ -244,6 +250,8 @@ mod tests {
         assert!(!st.sessions[0].turn_complete);
         assert!(!st.sessions[0].thinking);
         assert!(st.sessions[0].usage.is_none());
+        // an older detector has no tmux session list — defaults empty
+        assert!(st.tmux_sessions.is_empty());
     }
 
     /// `usage` is optional too — and every field inside it defaults, so a
