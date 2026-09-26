@@ -430,6 +430,7 @@ mod tests {
             transcript_live: false,
             usage_limited: false,
             resume_at: None,
+            subagent_idle_sec: None,
         }
     }
 

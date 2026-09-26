@@ -206,6 +206,24 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     if s.usage_limited {
         return (SessionState::Red, Reason::UsageLimited);
     }
+    // A parked AskUserQuestion is the one wait whose result IS the user.
+    // It must outrank the subagent freshness below: the model can park on a
+    // question while background agents keep running, and that ask is a
+    // genuine mid-flight wait for input the moment it renders.
+    if s.tool_running && s.tool_name == "AskUserQuestion" {
+        return (SessionState::Yellow, Reason::WaitingInput);
+    }
+    // Background subagents still writing their own transcripts: Claude Code
+    // writes the turn trailer while it holds the turn open waiting for them
+    // (observed live: blue "turn complete" while 12 background agents kept
+    // working, agents running in-process so no child process shows it). A
+    // fresh write under <stem>/subagents/ is proof the wait does not need
+    // the user; once they go quiet past the window, the trailer wins again.
+    if let Some(sub_idle) = s.subagent_idle_sec {
+        if sub_idle < st.idle_subagent_secs {
+            return (SessionState::Green, Reason::WaitingSubagent);
+        }
+    }
     // Still generating a thought: the last assistant record is only a
     // thinking block. That can outlast every idle window and needs no user.
     // A trailer after it means the turn actually ended — don't hide that.
@@ -229,12 +247,9 @@ fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
     // something that is not the user — green for a running tool, and green
     // for a subagent wait too: the subagents write their own transcripts
     // while this one goes quiet, the wait routinely outlasts every idle
-    // window, and it is forward progress. The one tool whose result IS a
-    // user action is AskUserQuestion — that park is a genuine wait for input.
+    // window, and it is forward progress (a parked AskUserQuestion was
+    // already answered above).
     if s.tool_running {
-        if s.tool_name == "AskUserQuestion" {
-            return (SessionState::Yellow, Reason::WaitingInput);
-        }
         if matches!(s.tool_name.as_str(), "Task" | "Agent" | "TaskOutput") {
             return (SessionState::Green, Reason::WaitingSubagent);
         }
@@ -499,6 +514,7 @@ mod tests {
             transcript_live: true,
             usage_limited: false,
             resume_at: None,
+            subagent_idle_sec: None,
         }
     }
 
@@ -912,6 +928,60 @@ mod tests {
             assert!(due.is_empty());
             assert!(v[0].blocked_since.is_none());
         }
+    }
+
+    /// Regression (observed live 2026-09-26, session "rag"): Claude Code
+    /// writes the `turn_duration` trailer right after the assistant's
+    /// "agents are running" status text while it holds the turn open for
+    /// background agents — 12 of them kept writing their own transcripts
+    /// for minutes while clawmon showed blue "回合完成" with the turn
+    /// "complete". The agents run in-process, so the only visible progress
+    /// is fresh writes under <stem>/subagents/: while those are fresh the
+    /// session is parked on subagents, not on the user.
+    #[test]
+    fn turn_trailer_with_fresh_subagents_stays_green() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        // the photographed state: trailer landed, 39 s "idle", agents fresh
+        let mut s = session(1, "assistant", 39);
+        s.turn_complete = true;
+        s.subagent_idle_sec = Some(5);
+        let (v, due, _) = e.update(snap(1000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::WaitingSubagent);
+        assert!(due.is_empty());
+        assert!(v[0].blocked_since.is_none());
+    }
+
+    /// The freshness window is what keeps the green provable: once the
+    /// subagent transcripts have gone quiet past it, the trailer is the
+    /// truth again and the finished turn settles to blue.
+    #[test]
+    fn stale_subagent_transcripts_do_not_hold_green() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 7200);
+        s.turn_complete = true;
+        s.subagent_idle_sec = Some(st.idle_subagent_secs + 60);
+        let (v, _, _) = e.update(snap(1000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::TurnComplete);
+    }
+
+    /// A parked AskUserQuestion is waiting on the user *now* — background
+    /// agents still running must not mask the yellow mid-flight ask.
+    #[test]
+    fn parked_askuserquestion_wins_over_fresh_subagents() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 45);
+        s.tool_running = true;
+        s.tool_name = "AskUserQuestion".into();
+        s.subagent_idle_sec = Some(5);
+        let (v, due, _) = e.update(snap(1000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Yellow);
+        assert_eq!(v[0].reason, Reason::WaitingInput);
+        assert!(due.is_empty());
     }
 
     #[test]

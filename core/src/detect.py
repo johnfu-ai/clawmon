@@ -810,6 +810,31 @@ def scan_usage(path):
     return entry
 
 
+def subagent_idle_sec(path, now):
+    """Seconds since the newest subagent transcript write, or None.
+
+    Background agents run in-process and write their own transcripts under
+    <stem>/subagents/ while the main transcript sits on a finished-turn
+    trailer — Claude Code holds the turn open for them, so that freshness
+    is the signal that the session waits on subagents, not on the user
+    (see the engine's WaitingSubagent green).
+    """
+    directory = os.path.dirname(path)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    newest = None
+    for sub in glob.glob(os.path.join(directory, stem, "subagents",
+                                      "agent-*.jsonl")):
+        try:
+            m = os.path.getmtime(sub)
+        except OSError:
+            continue
+        if newest is None or m > newest:
+            newest = m
+    if newest is None:
+        return None
+    return max(0, int(now - newest))
+
+
 def transcript_usage(path):
     """Total usage of a session: main transcript + subagent transcripts."""
     states = [scan_usage(path)]
@@ -950,6 +975,7 @@ def collect():
             "transcript_live": False,
             "usage_limited": False,
             "resume_at": None,
+            "subagent_idle_sec": None,
             "usage": None,
         }
         transcript = info["transcript"]
@@ -987,6 +1013,11 @@ def collect():
                 info["usage"] = transcript_usage(transcript)
             except Exception:
                 info["usage"] = None  # usage must never cost a poll
+            try:
+                info["subagent_idle_sec"] = subagent_idle_sec(
+                    transcript, time_now.timestamp())
+            except Exception:
+                pass  # freshness must never cost a poll either
         sessions.append(info)
     sessions.sort(key=lambda s: s["pid"])
     # every live tmux session name (not only claude ones): task launches

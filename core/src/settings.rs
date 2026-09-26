@@ -8,6 +8,11 @@ pub struct Settings {
     pub poll_interval_secs: u64,
     /// Idle below this → green (actively working).
     pub idle_green_secs: i64,
+    /// Subagent transcripts quieter than this → the subagent wait is over;
+    /// below it a turn trailer does not make the session blue. Generous on
+    /// purpose: an agent inside a long tool stops writing its transcript,
+    /// and flipping blue mid-wait was the bug this window exists for.
+    pub idle_subagent_secs: i64,
     /// Last transcript entry not from assistant AND idle above this → red
     /// (likely stuck waiting on the API, e.g. usage-limit pause).
     pub blocked_after_secs: i64,
@@ -51,6 +56,7 @@ impl Default for Settings {
         Self {
             poll_interval_secs: 5,
             idle_green_secs: 120,
+            idle_subagent_secs: 600,
             blocked_after_secs: 300,
             auto_continue: true,
             wait_secs: 5 * 3600,
@@ -103,6 +109,7 @@ impl Settings {
     pub fn sanitize(mut self) -> Settings {
         self.poll_interval_secs = self.poll_interval_secs.clamp(2, 3600);
         self.idle_green_secs = self.idle_green_secs.clamp(5, 86_400);
+        self.idle_subagent_secs = self.idle_subagent_secs.clamp(5, 86_400);
         self.blocked_after_secs = self.blocked_after_secs.clamp(10, 86_400);
         // 0 is meaningful (send as soon as the session turns red)
         self.wait_secs = self.wait_secs.min(7 * 86_400);
@@ -180,7 +187,8 @@ mod tests {
         std::fs::write(
             &path,
             r#"{"pollIntervalSecs":0,"maxSends":0,"retryIntervalSecs":0,
-                "idleGreenSecs":-5,"blockedAfterSecs":99999999}"#,
+                "idleGreenSecs":-5,"blockedAfterSecs":99999999,
+                "idleSubagentSecs":0}"#,
         )
         .unwrap();
         let s = Settings::load(&path);
@@ -188,6 +196,7 @@ mod tests {
         assert_eq!(s.max_sends, 1);
         assert_eq!(s.retry_interval_secs, 5);
         assert_eq!(s.idle_green_secs, 5);
+        assert_eq!(s.idle_subagent_secs, 5);
         assert_eq!(s.blocked_after_secs, 86_400);
     }
 

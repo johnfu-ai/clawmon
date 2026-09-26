@@ -67,6 +67,13 @@ pub struct RawSession {
     /// text (`限额将在 … 重置` / `It will reset at …`). None if unknown.
     #[serde(default)]
     pub resume_at: Option<i64>,
+    /// seconds since the newest write under <stem>/subagents/agent-*.jsonl
+    /// (None when the session never spawned subagents). Background agents
+    /// run in-process and keep writing their own transcripts while the
+    /// main transcript sits on a turn trailer — this freshness is the
+    /// signal that the wait is on subagents, not on the user.
+    #[serde(default)]
+    pub subagent_idle_sec: Option<i64>,
 }
 
 fn trusted() -> bool {
@@ -217,13 +224,15 @@ mod tests {
                 "tool_name": "",
                 "turn_complete": true,
                 "thinking": false,
-                "transcript_live": true
+                "transcript_live": true,
+                "subagent_idle_sec": 39
             }]
         }"#;
         let st: RawStatus = serde_json::from_str(raw).unwrap();
         assert_eq!(st.sessions.len(), 1);
         assert_eq!(st.sessions[0].tmux.as_ref().unwrap().pane, "%0");
         assert_eq!(st.sessions[0].idle_sec, Some(5));
+        assert_eq!(st.sessions[0].subagent_idle_sec, Some(39));
         assert_eq!(st.tmux_sessions, vec!["work".to_string()]);
         let u = st.sessions[0].usage.expect("usage present");
         assert_eq!(u.input, 1_100_000);
@@ -585,6 +594,76 @@ print(json.dumps(mod.last_entry(path)))
         assert_eq!(entry["type"], "assistant", "{entry}");
         assert_eq!(entry["tool_running"], true, "{entry}");
         assert_eq!(entry["tool_name"], "TaskOutput", "{entry}");
+    }
+
+    /// While background agents run, the main transcript ends on a finished
+    /// turn (trailers and all) and the agents' own transcripts under
+    /// <stem>/subagents/ are the only thing still moving. The freshness of
+    /// the newest agent file is what keeps such a session green, so the
+    /// helper must read it off the real layout: fresh → small, stale →
+    /// large, never spawned → None. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn subagent_idle_sec_reads_agent_transcript_freshness() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys, time
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+now = time.time()
+def mk_session(slug, stem, agent_mtimes):
+    d = os.path.join(work, "projects", slug)
+    os.makedirs(d)
+    main = os.path.join(d, stem + ".jsonl")
+    with open(main, "w") as f:
+        f.write(json.dumps({"type": "user", "timestamp":
+                            "2026-09-26T01:39:17Z", "sessionId": stem}) + "\n")
+    subs = os.path.join(d, stem, "subagents")
+    for i, m in enumerate(agent_mtimes):
+        os.makedirs(subs, exist_ok=True)
+        p = os.path.join(subs, "agent-%d.jsonl" % i)
+        open(p, "w").close()
+        os.utime(p, (m, m))
+    return main
+
+fresh = mk_session("-tmp-a", "aaa", [now - 100, now - 5])
+stale = mk_session("-tmp-b", "bbb", [now - 7200])
+none = mk_session("-tmp-c", "ccc", [])
+print(json.dumps({
+    "fresh": mod.subagent_idle_sec(fresh, now),
+    "stale": mod.subagent_idle_sec(stale, now),
+    "none": mod.subagent_idle_sec(none, now),
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("work");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        fs::create_dir(&work).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed JSON");
+        assert_eq!(got["fresh"], 5, "{got}");
+        assert_eq!(got["stale"], 7200, "{got}");
+        assert!(got["none"].is_null(), "{got}");
     }
 
     /// A 5-hour usage-limit 429 is written as a synthetic assistant record
