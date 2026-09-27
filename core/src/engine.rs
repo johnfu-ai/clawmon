@@ -315,9 +315,11 @@ fn classify(s: &RawSession, st: &Settings) -> Reason {
     if s.system_notice == "goal_paused" {
         return Reason::GoalPaused;
     }
-    // Background subagents still writing their own transcripts: Claude Code
-    // writes the turn trailer while it holds the turn open waiting for them.
-    // A fresh write is proof the wait does not need the user.
+    // Background subagents and dynamic workflows still writing their own
+    // transcripts: Claude Code writes the turn trailer (and may log a later
+    // slash command such as /workflows) while it holds the turn open waiting
+    // for them. A fresh write is proof the wait does not need the user, so
+    // it outranks that local command.
     if let Some(sub_idle) = s.subagent_idle_sec {
         if sub_idle < st.idle_subagent_secs {
             return Reason::WaitingSubagent;
@@ -1116,6 +1118,27 @@ mod tests {
         // the photographed state: trailer landed, 39 s "idle", agents fresh
         let mut s = session(1, "assistant", 39);
         s.turn_complete = true;
+        s.subagent_idle_sec = Some(5);
+        let (v, due, _) = e.update(snap(1000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::WaitingSubagent);
+        assert!(due.is_empty());
+        assert!(v[0].blocked_since.is_none());
+    }
+
+    /// Regression (observed live 2026-09-27, session "rag"): a dynamic
+    /// workflow keeps writing under subagents/workflows/<run>/ after the
+    /// turn trailer, and a later /workflows slash command is recorded as
+    /// a local_command. That command alone is "待命". Fresh workflow
+    /// writes are the same proof as a background subagent, so the slash
+    /// command must not win while they are fresh.
+    #[test]
+    fn fresh_workflow_agents_outrank_a_later_local_command() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        let mut s = session(1, "assistant", 120);
+        s.turn_complete = true;
+        s.user_kind = "local_command".into();
         s.subagent_idle_sec = Some(5);
         let (v, due, _) = e.update(snap(1000, vec![s]), &st);
         assert_eq!(v[0].state, SessionState::Green);

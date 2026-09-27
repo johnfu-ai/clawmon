@@ -1094,20 +1094,41 @@ def scan_usage(path):
     return entry
 
 
-def subagent_idle_sec(path, now):
-    """Seconds since the newest subagent transcript write, or None.
+def subagent_activity_files(path):
+    """Transcripts a background agent of this session is still writing.
 
-    Background agents run in-process and write their own transcripts under
-    <stem>/subagents/ while the main transcript sits on a finished-turn
-    trailer — Claude Code holds the turn open for them, so that freshness
-    is the signal that the session waits on subagents, not on the user
-    (see the engine's WaitingSubagent green).
+    Direct subagents land at <stem>/subagents/agent-*.jsonl. A dynamic
+    workflow (Claude Code: "Waiting for N dynamic workflow(s) to finish")
+    lands one level deeper, at
+    <stem>/subagents/workflows/<run-id>/agent-*.jsonl, and its journal.jsonl
+    moves as phases start and finish. Both are the same in-process wait.
     """
     directory = os.path.dirname(path)
     stem = os.path.splitext(os.path.basename(path))[0]
+    base = os.path.join(directory, stem, "subagents")
+    patterns = (
+        os.path.join(base, "agent-*.jsonl"),
+        os.path.join(base, "workflows", "*", "agent-*.jsonl"),
+        os.path.join(base, "workflows", "*", "journal.jsonl"),
+    )
+    found = []
+    for pat in patterns:
+        found.extend(glob.glob(pat))
+    return found
+
+
+def subagent_idle_sec(path, now):
+    """Seconds since the newest subagent transcript write, or None.
+
+    Background agents and dynamic workflows run in-process and write their
+    own transcripts (see subagent_activity_files) while the main transcript
+    sits on a finished-turn trailer — Claude Code holds the turn open for
+    them, so that freshness is the signal that the session waits on agents,
+    not on the user (see the engine's WaitingSubagent green). A later local
+    slash command such as /workflows does not end the wait.
+    """
     newest = None
-    for sub in glob.glob(os.path.join(directory, stem, "subagents",
-                                      "agent-*.jsonl")):
+    for sub in subagent_activity_files(path):
         try:
             m = os.path.getmtime(sub)
         except OSError:

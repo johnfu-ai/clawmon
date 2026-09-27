@@ -68,10 +68,12 @@ pub struct RawSession {
     #[serde(default)]
     pub resume_at: Option<i64>,
     /// seconds since the newest write under <stem>/subagents/agent-*.jsonl
-    /// (None when the session never spawned subagents). Background agents
-    /// run in-process and keep writing their own transcripts while the
-    /// main transcript sits on a turn trailer — this freshness is the
-    /// signal that the wait is on subagents, not on the user.
+    /// or <stem>/subagents/workflows/<run>/ (agent transcripts and the
+    /// phase journal). None when the session never spawned either.
+    /// Background agents and dynamic workflows run in-process and keep
+    /// writing those files while the main transcript sits on a turn
+    /// trailer — this freshness is the signal that the wait is on agents,
+    /// not on the user.
     #[serde(default)]
     pub subagent_idle_sec: Option<i64>,
     /// what a trailing user record is: "prompt", "tool_result",
@@ -694,6 +696,73 @@ print(json.dumps({
         assert_eq!(got["fresh"], 5, "{got}");
         assert_eq!(got["stale"], 7200, "{got}");
         assert!(got["none"].is_null(), "{got}");
+    }
+
+    /// Dynamic workflows do not write `<stem>/subagents/agent-*.jsonl`.
+    /// Their agents and the phase journal live one level deeper, at
+    /// `<stem>/subagents/workflows/<run-id>/`. A session parked on
+    /// "Waiting for N dynamic workflow(s) to finish" is the same wait as
+    /// a background subagent, so that layout must feed the same freshness
+    /// number. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn workflow_agent_transcripts_count_as_subagent_freshness() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys, time
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+now = time.time()
+stem = "d80316e6"
+d = os.path.join(work, "projects", "-tmp-wf")
+os.makedirs(d)
+main = os.path.join(d, stem + ".jsonl")
+with open(main, "w") as f:
+    f.write(json.dumps({"type": "assistant", "timestamp":
+                        "2026-09-27T02:34:57Z", "sessionId": stem}) + "\n")
+run = os.path.join(d, stem, "subagents", "workflows", "wf_c677829e-a3c")
+os.makedirs(run)
+agent = os.path.join(run, "agent-a1de1d549dca551a7.jsonl")
+journal = os.path.join(run, "journal.jsonl")
+open(agent, "w").close()
+open(journal, "w").close()
+os.utime(agent, (now - 40, now - 40))
+os.utime(journal, (now - 4, now - 4))
+# a finished run sitting next to the live one must not hide the fresh write
+old = os.path.join(d, stem, "subagents", "workflows", "wf_old")
+os.makedirs(old)
+old_agent = os.path.join(old, "agent-old.jsonl")
+open(old_agent, "w").close()
+os.utime(old_agent, (now - 9000, now - 9000))
+print(json.dumps(mod.subagent_idle_sec(main, now)))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("work");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        fs::create_dir(&work).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed JSON");
+        assert_eq!(got, 4, "{got}");
     }
 
     /// A 5-hour usage-limit 429 is written as a synthetic assistant record
