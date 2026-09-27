@@ -5,7 +5,7 @@ let LANG = "zh";
 
 const T = {
   /* header / empty / banner */
-  "app.title": ["Claude WSL 监控", "Claude WSL Monitor"],
+  "app.title": ["cc-monitor", "cc-monitor"],
   "settings.tooltip": ["设置", "Settings"],
   "empty.title": ["未发现运行中的 Claude Code 会话", "No running Claude Code sessions"],
   "empty.hint": ["在 WSL 终端里启动 claude 即可自动识别", "Start claude in a WSL terminal and it shows up here"],

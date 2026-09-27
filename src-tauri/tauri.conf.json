@@ -9,7 +9,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Claude WSL 监控",
+        "title": "Claude Code WSL Session Monitor",
         "width": 400,
         "height": 620,
         "minWidth": 340,
