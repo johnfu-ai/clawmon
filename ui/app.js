@@ -208,8 +208,9 @@ function render(sessions, warning) {
 
 const LIGHTS = ["green", "blue", "yellow", "red"];
 
-/* A red session shows either "…until auto-continue" or, once it has been
-   resumed, "resumed N × · …" — both need the send count in front. */
+/* A stall (green countdown, or red once auto-continue cannot help) shows
+   either "…until auto-continue" or, once it has been resumed, "resumed N × ·
+   …" — both need the send count in front. */
 function countdownText(session, remainingSec) {
   const prefix = session.sends > 0 ? t("cd.resumed", { n: session.sends }) : "";
   return prefix + fmtCountdown(remainingSec) + t("cd.until");
@@ -516,6 +517,7 @@ function loadSettingsForm(s) {
   f.notifyContinue.checked = s.notifyContinue;
   f.notifyRecovered.checked = s.notifyRecovered;
   f.notifyTurnEnd.checked = s.notifyTurnEnd;
+  f.notifyInput.checked = s.notifyInput !== false;
   f.notifyExit.checked = s.notifyExit;
   f.soundAlerts.checked = s.soundAlerts;
 }
@@ -545,6 +547,7 @@ async function saveSettings(ev) {
     notifyContinue: f.notifyContinue.checked,
     notifyRecovered: f.notifyRecovered.checked,
     notifyTurnEnd: f.notifyTurnEnd.checked,
+    notifyInput: f.notifyInput.checked,
     notifyExit: f.notifyExit.checked,
     soundAlerts: f.soundAlerts.checked,
   };

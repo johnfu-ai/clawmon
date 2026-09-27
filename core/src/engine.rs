@@ -37,6 +37,11 @@ pub enum Reason {
     /// the session is blocked on the human *mid-flight*: a parked
     /// AskUserQuestion whose "tool result" IS the user's answer
     WaitingInput,
+    /// claude is parked on ExitPlanMode — the plan is written and the
+    /// user has to approve it before the turn can continue
+    WaitingApproval,
+    /// a /goal (or similar) paused and told the user to send a message
+    GoalPaused,
     /// the last entry is a user prompt and claude has not answered yet —
     /// waiting on the API, which needs no user action however long it takes
     WaitingResponse,
@@ -44,6 +49,18 @@ pub enum Reason {
     /// a 5-hour (or similar) usage-limit 429 paused the goal; auto-continue
     /// waits for the reset timestamp parsed from the error, then sends Enter
     UsageLimited,
+    /// a non-quota API error ended the turn. Retryable ones are a stall
+    /// (auto-continue may get past them); 400/401/403/404 are not
+    ApiError,
+    /// claude itself said it will retry ("retrying in 1 min") — green,
+    /// it is already handling the failure
+    ApiRetrying,
+    /// the user interrupted the turn; claude is back at the prompt
+    Interrupted,
+    /// sitting at the prompt with nothing owed: a fresh session, a local
+    /// slash command that already ran, or a prompt whose process is idle
+    /// so it is not actually waiting on the API
+    Ready,
 }
 
 /// What happened to a session between two polls — the hooks the shell layer
@@ -57,6 +74,9 @@ pub enum EventKind {
     Recovered,
     /// finished its turn and is now waiting for the user's next instruction
     TurnEnd,
+    /// parked on something only the user can answer (a question, a plan
+    /// approval, a paused goal)
+    NeedsInput,
     /// the claude process is gone
     Exited,
 }
@@ -97,9 +117,10 @@ struct Tracked {
     last_send_at: Option<i64>,
     /// state at the previous poll, for edge detection
     last_state: Option<SessionState>,
-    /// the previous poll already saw this session awaiting the user (turn
-    /// complete or a parked AskUserQuestion)
-    was_waiting_input: bool,
+    /// the previous poll already saw a finished turn — TurnEnd fires once
+    saw_turn_complete: bool,
+    /// the previous poll already saw a mid-flight ask — NeedsInput fires once
+    saw_needs_input: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,6 +192,14 @@ pub struct Engine {
 /// 429s, and one poll interval is not a reliable buffer.
 const USAGE_LIMIT_GRACE_SECS: i64 = 30;
 
+/// utime+stime ticks/s below which the process is sitting still.
+/// Measured 2026-09-27, Claude Code 2.1.280, CLK_TCK 100: idle at the
+/// prompt is 0–2 (a 1 Hz status timer; a rare one-second burst near 11
+/// averages under 4 across the 5 s poll). A turn that is streaming sits
+/// at 10–25. Unknown (None) is not idle — one-shot mode has no sample,
+/// and the classifier then trusts the transcript alone.
+const PROCESS_IDLE_TICKS_PER_SEC: f64 = 5.0;
+
 fn basename(p: &str) -> String {
     let p = p.trim_end_matches('/');
     if p.is_empty() {
@@ -179,97 +208,177 @@ fn basename(p: &str) -> String {
     p.rsplit('/').next().unwrap_or(p).to_string()
 }
 
-/// Light semantics: green means "no user action needed" — claude is working,
-/// waiting on the API, or waiting on a tool/subagent. Blue means the turn
-/// completed and claude awaits the next instruction: done, not asking anything.
-/// Yellow means the session is blocked on the user mid-flight, or we cannot
-/// tell what it is waiting for. Red is the auto-continue case: a user prompt
-/// that has gone unanswered past the timeout, or a usage-limit 429 whose
-/// reset we will wait out (Claude Code still writes a turn trailer for those).
-fn classify(s: &RawSession, st: &Settings) -> (SessionState, Reason) {
+fn process_is_idle(s: &RawSession) -> bool {
+    match s.cpu_ticks_per_sec {
+        Some(rate) => rate < PROCESS_IDLE_TICKS_PER_SEC,
+        None => false,
+    }
+}
+
+/// A stall is a failure auto-continue may be able to get past: a prompt
+/// that went unanswered, a usage-limit 429, or a retryable API error.
+/// A non-retryable API error is not a stall — Enter will not fix it.
+fn is_stall(reason: Reason, api_retryable: bool) -> bool {
+    match reason {
+        Reason::ResponseTimedOut | Reason::UsageLimited => true,
+        Reason::ApiError => api_retryable,
+        _ => false,
+    }
+}
+
+/// Yellow reasons where the session is waiting on the human mid-flight,
+/// as opposed to "we cannot tell" (no transcript / stale transcript).
+fn needs_input(reason: Reason) -> bool {
+    matches!(
+        reason,
+        Reason::WaitingInput | Reason::WaitingApproval | Reason::GoalPaused
+    )
+}
+
+/// Light from the reason plus whether clawmon can still fix a stall.
+///
+/// Green is "no user action needed", and that includes a stall whose
+/// auto-continue countdown is still running. Red is only "a person has to
+/// fix this": the stall cannot be auto-continued (not in tmux, auto-continue
+/// off, attempts used up), or the API error is not retryable. Blue is a
+/// finished turn or an idle prompt. Yellow is a mid-flight ask, or a
+/// transcript we cannot trust — never red, never auto-sent.
+fn light(
+    reason: Reason,
+    retryable: bool,
+    controllable: bool,
+    settings: &Settings,
+    sends: u32,
+) -> SessionState {
+    if is_stall(reason, retryable) {
+        let can_fix = controllable && settings.auto_continue && sends < settings.max_sends;
+        return if can_fix {
+            SessionState::Green
+        } else {
+            SessionState::Red
+        };
+    }
+    match reason {
+        Reason::ApiError => SessionState::Red,
+        Reason::Active
+        | Reason::WaitingResponse
+        | Reason::ToolRunning
+        | Reason::WaitingSubagent
+        | Reason::ApiRetrying => SessionState::Green,
+        Reason::TurnComplete | Reason::Interrupted | Reason::Ready => SessionState::Blue,
+        Reason::WaitingInput
+        | Reason::WaitingApproval
+        | Reason::GoalPaused
+        | Reason::NoTranscript
+        | Reason::TranscriptStale => SessionState::Yellow,
+        // stalls are handled above; listed so the match stays exhaustive
+        Reason::ResponseTimedOut | Reason::UsageLimited => SessionState::Red,
+    }
+}
+
+/// Why the session is where it is. The color is `light`'s decision: a stall
+/// reason is green while auto-continue can still fire and red when it cannot.
+fn classify(s: &RawSession, st: &Settings) -> Reason {
     let idle = s.idle_sec.unwrap_or(i64::MAX);
-    // Without a transcript we can vouch for, "idle for six hours" means
-    // nothing: either claude has not written anything yet, or the file
-    // belongs to a different session. Never call that blocked — the cost of a
-    // false positive is pressing Enter in an innocent terminal — and never
-    // call it healthy either: it may well be parked on the user, so it stays
+    // Without a transcript we can vouch for, never call the session blocked —
+    // the cost of a false positive is pressing Enter in an innocent terminal.
+    // A process that is sitting still with no transcript yet is a fresh
+    // session at the prompt (blue). Anything we cannot prove idle stays
     // yellow with every other "cannot tell" case.
     if s.transcript.is_none() {
-        return (SessionState::Yellow, Reason::NoTranscript);
+        return if process_is_idle(s) {
+            Reason::Ready
+        } else {
+            Reason::NoTranscript
+        };
     }
     if !s.transcript_live {
-        return (SessionState::Yellow, Reason::TranscriptStale);
+        return Reason::TranscriptStale;
     }
     // A usage-quota 429 is a synthetic assistant record with a turn trailer,
-    // so the finished-turn check below would paint it blue. It is the
-    // auto-continue case — red as soon as we can trust the transcript.
+    // so the finished-turn check below would paint it done. It is a stall.
     if s.usage_limited {
-        return (SessionState::Red, Reason::UsageLimited);
+        return Reason::UsageLimited;
     }
     // A parked AskUserQuestion is the one wait whose result IS the user.
     // It must outrank the subagent freshness below: the model can park on a
-    // question while background agents keep running, and that ask is a
-    // genuine mid-flight wait for input the moment it renders.
+    // question while background agents keep running.
     if s.tool_running && s.tool_name == "AskUserQuestion" {
-        return (SessionState::Yellow, Reason::WaitingInput);
+        return Reason::WaitingInput;
+    }
+    // ExitPlanMode is the same shape: the tool result is the user's approval.
+    if s.tool_running && s.tool_name == "ExitPlanMode" {
+        return Reason::WaitingApproval;
+    }
+    // A paused goal asked the user to send a message. That outranks a
+    // trailer and fresh subagents — the ask is the point.
+    if s.system_notice == "goal_paused" {
+        return Reason::GoalPaused;
     }
     // Background subagents still writing their own transcripts: Claude Code
-    // writes the turn trailer while it holds the turn open waiting for them
-    // (observed live: blue "turn complete" while 12 background agents kept
-    // working, agents running in-process so no child process shows it). A
-    // fresh write under <stem>/subagents/ is proof the wait does not need
-    // the user; once they go quiet past the window, the trailer wins again.
+    // writes the turn trailer while it holds the turn open waiting for them.
+    // A fresh write is proof the wait does not need the user.
     if let Some(sub_idle) = s.subagent_idle_sec {
         if sub_idle < st.idle_subagent_secs {
-            return (SessionState::Green, Reason::WaitingSubagent);
+            return Reason::WaitingSubagent;
         }
     }
-    // Still generating a thought: the last assistant record is only a
-    // thinking block. That can outlast every idle window and needs no user.
-    // A trailer after it means the turn actually ended — don't hide that.
+    // Claude said it will retry on its own. Green, even though the turn
+    // record is an API error and a trailer may already have landed.
+    if s.system_notice == "retrying" {
+        return Reason::ApiRetrying;
+    }
+    // Still generating a thought. A trailer after it means the turn ended.
     if s.thinking && !s.turn_complete {
-        return (SessionState::Green, Reason::Active);
+        return Reason::Active;
     }
-    // Claude Code appends a timestamped `turn_duration` / `stop_hook_summary`
-    // after a finished turn. That is the only signal that the assistant
-    // text is the end of the turn rather than a mid-flight status line
-    // before the next think or tool_use. A 30s idle heuristic flipped blue
-    // (and the fallback flipped yellow) while the model was still working.
+    if s.api_error {
+        return Reason::ApiError;
+    }
+    // Not prompts the model owes a reply to. Checked before the idle window
+    // so a local command a few seconds ago is "ready", not "running".
+    if s.user_kind == "interrupt" {
+        return Reason::Interrupted;
+    }
+    if s.user_kind == "local_command" || s.user_kind == "meta" {
+        return Reason::Ready;
+    }
+    // The turn trailer is the completion signal, and it lands within seconds.
+    // A mid-flight assistant status line has no trailer and stays active.
     if s.last_type == "assistant" && !s.tool_running && s.turn_complete {
-        return (SessionState::Blue, Reason::TurnComplete);
+        return Reason::TurnComplete;
     }
-    // transcript activity within the green window → actively working
     if idle < st.idle_green_secs {
-        return (SessionState::Green, Reason::Active);
+        return Reason::Active;
     }
     // a tool_use block is the last transcript activity: the tool result is
-    // only appended when the tool *finishes*, so claude is waiting on
-    // something that is not the user — green for a running tool, and green
-    // for a subagent wait too: the subagents write their own transcripts
-    // while this one goes quiet, the wait routinely outlasts every idle
-    // window, and it is forward progress (a parked AskUserQuestion was
-    // already answered above).
+    // only appended when the tool finishes, so claude is waiting on
+    // something that is not the user. A parked AskUserQuestion was already
+    // answered above.
     if s.tool_running {
         if matches!(s.tool_name.as_str(), "Task" | "Agent" | "TaskOutput") {
-            return (SessionState::Green, Reason::WaitingSubagent);
+            return Reason::WaitingSubagent;
         }
-        return (SessionState::Green, Reason::ToolRunning);
+        return Reason::ToolRunning;
     }
-    // only a trailing *user* prompt is "waiting on the API" — slow is not
-    // stuck, so green until the timeout window says otherwise.
+    // only a trailing user prompt or tool result is "waiting on the API".
+    // Past the timeout, a process that is sitting still is not waiting on
+    // anything — pressing Enter there is the false red this signal exists
+    // to prevent. Unknown CPU (one-shot, first poll) trusts the transcript.
     if s.last_type == "user" {
         if idle >= st.blocked_after_secs {
-            (SessionState::Red, Reason::ResponseTimedOut)
+            if process_is_idle(s) {
+                Reason::Ready
+            } else {
+                Reason::ResponseTimedOut
+            }
         } else {
-            (SessionState::Green, Reason::WaitingResponse)
+            Reason::WaitingResponse
         }
     } else {
         // assistant without a trailer, or a bookkeeping last_type we could
-        // not classify: past the active window this looks finished, not a
-        // mid-flight ask. Yellow stays AskUserQuestion / cannot-tell
-        // (no or stale transcript) only — labeling this "waiting for input"
-        // was the false yellow while claude was still running.
-        (SessionState::Blue, Reason::TurnComplete)
+        // not classify: past the active window this looks finished.
+        Reason::TurnComplete
     }
 }
 
@@ -335,54 +444,39 @@ impl Engine {
         self.tracked.retain(|k, _| live.contains(k));
 
         for s in &snap.sessions {
-            let (state, reason) = classify(s, settings);
+            let reason = classify(s, settings);
+            let stall = is_stall(reason, s.api_error_retryable);
             let t = self.tracked.entry(s.pid).or_default();
             let prev_state = t.last_state;
-            let prev_waiting = t.was_waiting_input;
+            let saw_turn = t.saw_turn_complete;
+            let saw_input = t.saw_needs_input;
+            let had_episode = t.blocked_since.is_some();
 
-            if t.last_state == Some(SessionState::Red) && state != SessionState::Red {
+            // The episode is the stall, not the red light: a countdown that
+            // clawmon is still handling stays green, and the bookkeeping
+            // (when it started, how many Enters) has to survive that.
+            if stall {
+                if t.blocked_since.is_none() {
+                    t.blocked_since = Some(now);
+                }
+            } else if had_episode {
                 events.push(SessionEvent {
                     pid: s.pid,
                     kind: EventKind::Recovered,
                     project: basename(&s.cwd),
                 });
+                t.blocked_since = None;
+                t.sends = 0;
+                t.last_send_at = None;
             }
-
-            if state == SessionState::Red {
-                if t.blocked_since.is_none() {
-                    t.blocked_since = Some(now);
-                    events.push(SessionEvent {
-                        pid: s.pid,
-                        kind: EventKind::TurnedRed,
-                        project: basename(&s.cwd),
-                    });
-                }
-            } else if t.blocked_since.is_some() {
-                // recovered or never was blocked — reset the episode
-                *t = Tracked::default();
-            }
-
-            // claude finished its turn (or parked an AskUserQuestion) and now
-            // waits for the human — worth a poke for anyone running long
-            // unattended jobs. Fire on the edge only (and never on the very
-            // first sighting: a monitor started mid-wait should not report a
-            // turn that ended hours ago).
-            let awaits_user = matches!(reason, Reason::TurnComplete | Reason::WaitingInput);
-            if awaits_user && !prev_waiting && prev_state.is_some() {
-                events.push(SessionEvent {
-                    pid: s.pid,
-                    kind: EventKind::TurnEnd,
-                    project: basename(&s.cwd),
-                });
-            }
-            t.was_waiting_input = awaits_user;
-            t.last_state = Some(state);
 
             let controllable = s.tmux.is_some();
-            // No countdown for a session we cannot control: showing one would
-            // promise a key press that is never going to happen.
+            // Countdown for every stall, green or red. No countdown for a
+            // session we cannot control: showing one would promise a key
+            // press that is never going to happen. A non-retryable API
+            // error is not a stall, so it gets no countdown either.
             let mut countdown = None;
-            if state == SessionState::Red {
+            if stall {
                 countdown = Some(if !controllable {
                     Countdown::NoTmux
                 } else if !settings.auto_continue {
@@ -424,6 +518,55 @@ impl Engine {
                     }
                 });
             }
+
+            // After the send is booked, so the poll that uses the last
+            // attempt is already red — there is no further auto-continue.
+            let state = light(
+                reason,
+                s.api_error_retryable,
+                controllable,
+                settings,
+                t.sends,
+            );
+            let was_red = prev_state == Some(SessionState::Red);
+            if state == SessionState::Red && !was_red {
+                events.push(SessionEvent {
+                    pid: s.pid,
+                    kind: EventKind::TurnedRed,
+                    project: basename(&s.cwd),
+                });
+            } else if was_red && state != SessionState::Red && !had_episode {
+                // a red that was not a stall (a non-retryable API error)
+                // cleared on its own
+                events.push(SessionEvent {
+                    pid: s.pid,
+                    kind: EventKind::Recovered,
+                    project: basename(&s.cwd),
+                });
+            }
+
+            // Fire on the edge only, and never on the very first sighting:
+            // a monitor started mid-wait must not report a turn that ended
+            // hours ago, or a question that has been on screen all day.
+            if prev_state.is_some() {
+                if reason == Reason::TurnComplete && !saw_turn {
+                    events.push(SessionEvent {
+                        pid: s.pid,
+                        kind: EventKind::TurnEnd,
+                        project: basename(&s.cwd),
+                    });
+                }
+                if needs_input(reason) && !saw_input {
+                    events.push(SessionEvent {
+                        pid: s.pid,
+                        kind: EventKind::NeedsInput,
+                        project: basename(&s.cwd),
+                    });
+                }
+            }
+            t.saw_turn_complete = reason == Reason::TurnComplete;
+            t.saw_needs_input = needs_input(reason);
+            t.last_state = Some(state);
 
             views.push(SessionView {
                 pid: s.pid,
@@ -515,6 +658,11 @@ mod tests {
             usage_limited: false,
             resume_at: None,
             subagent_idle_sec: None,
+            user_kind: String::new(),
+            api_error: false,
+            api_error_retryable: false,
+            system_notice: String::new(),
+            cpu_ticks_per_sec: None,
         }
     }
 
@@ -693,20 +841,39 @@ mod tests {
         assert!(v[0].blocked_since.is_none());
     }
 
+    /// Waiting on the API needs no user action, however long it takes — green
+    /// while merely slow. Past the timeout it is still green when the session
+    /// is in tmux and auto-continue can fire: the countdown is clawmon's job,
+    /// not the user's. The same timeout outside tmux is red.
     #[test]
-    fn green_then_red_when_waiting_on_api() {
+    fn timeout_is_green_while_auto_continue_can_fire_and_red_otherwise() {
         let st = Settings::default();
         let mut e = Engine::new();
-        // default blocked_after_secs = 300; waiting on the API needs no user
-        // action, however long it takes — green while merely slow
+        // default blocked_after_secs = 300
         let (v, _, _) = e.update(snap(1000, vec![session(1, "user", 240)]), &st);
         assert_eq!(v[0].state, SessionState::Green);
         assert_eq!(v[0].reason, Reason::WaitingResponse);
 
-        let (v, _, _) = e.update(snap(1300, vec![session(1, "user", 540)]), &st);
+        let (v, _, evs) = e.update(snap(1300, vec![session(1, "user", 540)]), &st);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::ResponseTimedOut);
+        assert!(waiting_remaining(&v[0]).is_some());
+        assert_eq!(v[0].blocked_since, Some(1300));
+        assert!(
+            evs.iter().all(|e| e.kind != EventKind::TurnedRed),
+            "a countdown clawmon is handling is not a red episode: {evs:?}"
+        );
+
+        let mut bare = session(2, "user", 540);
+        bare.tmux = None;
+        let mut e2 = Engine::new();
+        let (v, due, evs) = e2.update(snap(1300, vec![bare]), &st);
         assert_eq!(v[0].state, SessionState::Red);
         assert_eq!(v[0].reason, Reason::ResponseTimedOut);
-        assert_eq!(v[0].blocked_since, Some(1300));
+        assert_eq!(v[0].countdown, Some(Countdown::NoTmux));
+        assert!(due.is_empty());
+        assert_eq!(evs.len(), 1, "{evs:?}");
+        assert_eq!(evs[0].kind, EventKind::TurnedRed);
     }
 
     #[test]
@@ -718,7 +885,11 @@ mod tests {
         let mut e = Engine::new();
         let t0 = 10_000;
         let (v, due, _) = e.update(snap(t0, vec![session(1, "user", 1000)]), &st);
-        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(
+            v[0].state,
+            SessionState::Green,
+            "the countdown itself needs no user"
+        );
         assert!(due.is_empty());
         assert_eq!(waiting_remaining(&v[0]), Some(100));
         assert_eq!(v[0].sends, 0);
@@ -994,7 +1165,11 @@ mod tests {
                 vec![
                     session(5, "assistant", 10),  // green (active)
                     session(6, "assistant", 300), // blue (turn complete)
-                    session(9, "user", 900),      // red (timed out)
+                    {
+                        let mut s = session(9, "user", 900); // red: timed out, not in tmux
+                        s.tmux = None;
+                        s
+                    },
                 ],
             ),
             &st,
@@ -1012,7 +1187,11 @@ mod tests {
                 vec![
                     session(5, "assistant", 10),  // green (active)
                     session(6, "assistant", 300), // blue (turn complete)
-                    session(9, "user", 900),      // red (timed out)
+                    {
+                        let mut s = session(9, "user", 900); // red: timed out, not in tmux
+                        s.tmux = None;
+                        s
+                    },
                 ],
             ),
             &st,
@@ -1056,14 +1235,18 @@ mod tests {
         let (_, _, evs) = e.update(snap(t0, vec![session(1, "assistant", 2)]), &st);
         assert!(evs.is_empty(), "nothing happens on a healthy first poll");
 
-        // goes red
-        let (_, _, evs) = e.update(snap(t0 + 400, vec![session(1, "user", 400)]), &st);
+        // goes red — not in tmux, so auto-continue cannot press Enter
+        let mut stuck = session(1, "user", 400);
+        stuck.tmux = None;
+        let (_, _, evs) = e.update(snap(t0 + 400, vec![stuck]), &st);
         assert_eq!(evs.len(), 1, "{evs:?}");
         assert_eq!(evs[0].kind, EventKind::TurnedRed);
         assert_eq!(evs[0].project, "statebar");
 
         // stays red — quiet
-        let (_, _, evs) = e.update(snap(t0 + 500, vec![session(1, "user", 500)]), &st);
+        let mut stuck = session(1, "user", 500);
+        stuck.tmux = None;
+        let (_, _, evs) = e.update(snap(t0 + 500, vec![stuck]), &st);
         assert!(evs.is_empty(), "{evs:?}");
 
         // recovers on its own
@@ -1099,11 +1282,11 @@ mod tests {
     }
 
     /// The 5-hour usage-limit 429 is a synthetic assistant record with a
-    /// turn trailer — the same shape as a finished turn. It is not done:
-    /// claude is paused until the window resets, and Enter after that
-    /// timestamp is the auto-continue this app exists for.
+    /// turn trailer — the same shape as a finished turn. It is not done.
+    /// Inside tmux the countdown is green (clawmon will press Enter at the
+    /// reset); that is not a "needs a person" notification.
     #[test]
-    fn usage_limit_is_red_even_when_the_turn_trailer_landed() {
+    fn usage_limit_countdown_is_green_until_the_reset() {
         let st = Settings {
             wait_secs: 0,
             ..Default::default()
@@ -1115,7 +1298,7 @@ mod tests {
         s.resume_at = Some(11_000);
         s.preview = "API Error: Request rejected (429) · [1308][已达到 5 小时的使用上限。您的限额将在 2026-09-19 16:21:07 重置。]".into();
         let (v, due, evs) = e.update(snap(10_000, vec![s]), &st);
-        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(v[0].state, SessionState::Green);
         assert_eq!(v[0].reason, Reason::UsageLimited);
         assert!(
             due.is_empty(),
@@ -1125,8 +1308,10 @@ mod tests {
             waiting_remaining(&v[0]),
             Some(11_000 + USAGE_LIMIT_GRACE_SECS - 10_000)
         );
-        assert_eq!(evs.len(), 1, "{evs:?}");
-        assert_eq!(evs[0].kind, EventKind::TurnedRed);
+        assert!(
+            evs.iter().all(|e| e.kind != EventKind::TurnedRed),
+            "{evs:?}"
+        );
     }
 
     /// First auto-continue is scheduled at the reset timestamp (plus a
@@ -1148,7 +1333,7 @@ mod tests {
         };
         let t0 = 10_000;
         let (v, due, _) = e.update(snap(t0, vec![limited(0)]), &st);
-        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(v[0].state, SessionState::Green);
         assert!(due.is_empty());
         let remain = waiting_remaining(&v[0]).expect("countdown");
         assert_eq!(remain, 90 * 60 + USAGE_LIMIT_GRACE_SECS);
@@ -1165,7 +1350,8 @@ mod tests {
     }
 
     /// No parseable reset time: fall back to the configured wait, same
-    /// as a hanging user prompt. Still red, still not "turn complete".
+    /// as a hanging user prompt. Green while auto-continue can fire, and
+    /// not "turn complete".
     #[test]
     fn usage_limit_without_resume_at_uses_wait_secs() {
         let st = Settings {
@@ -1177,7 +1363,7 @@ mod tests {
         s.turn_complete = true;
         s.usage_limited = true;
         let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
-        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(v[0].state, SessionState::Green);
         assert_eq!(v[0].reason, Reason::UsageLimited);
         assert!(due.is_empty());
         assert_eq!(waiting_remaining(&v[0]), Some(100));
@@ -1202,5 +1388,173 @@ mod tests {
         let (v, _, _) = e.update(snap(10_001, vec![session(1, "user", 5000)]), &st);
         assert_eq!(v[0].sends, 2);
         assert_eq!(v[0].last_send_at, Some(10_000));
+    }
+
+    /// A prompt past the timeout whose process is sitting still is not
+    /// waiting on the API. Measured idle is under 2 ticks/s; 5 is the line.
+    /// An idle process is never auto-sent Enter.
+    #[test]
+    fn idle_process_past_the_timeout_is_ready_not_red() {
+        let st = Settings {
+            wait_secs: 0,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut s = session(1, "user", 5000);
+        s.user_kind = "prompt".into();
+        s.cpu_ticks_per_sec = Some(1.5);
+        let (v, due, _) = e.update(snap(10_000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::Ready);
+        assert!(due.is_empty());
+        assert!(v[0].countdown.is_none());
+        assert!(v[0].blocked_since.is_none());
+
+        // still busy (streaming, or CPU unknown): the timeout stands
+        let mut busy = session(1, "user", 5000);
+        busy.cpu_ticks_per_sec = Some(12.0);
+        let (v, _, _) = e.update(snap(10_001, vec![busy]), &st);
+        assert_eq!(v[0].reason, Reason::ResponseTimedOut);
+        assert_eq!(v[0].state, SessionState::Green);
+    }
+
+    /// No transcript yet, and the process is idle: a fresh session at the
+    /// prompt. Without a CPU sample we still cannot tell, so it stays yellow
+    /// and is never auto-sent.
+    #[test]
+    fn fresh_idle_session_with_no_transcript_is_ready() {
+        let st = Settings {
+            wait_secs: 0,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut s = session(1, "", 0);
+        s.transcript = None;
+        s.transcript_live = false;
+        s.idle_sec = None;
+        s.cpu_ticks_per_sec = Some(0.4);
+        let (v, due, _) = e.update(snap(1000, vec![s]), &st);
+        assert_eq!(v[0].state, SessionState::Blue);
+        assert_eq!(v[0].reason, Reason::Ready);
+        assert!(due.is_empty());
+    }
+
+    #[test]
+    fn interrupt_and_local_command_are_ready_not_waiting_on_the_api() {
+        let st = Settings {
+            wait_secs: 0,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut interrupted = session(1, "user", 5000);
+        interrupted.user_kind = "interrupt".into();
+        let mut local = session(2, "user", 5000);
+        local.user_kind = "local_command".into();
+        let (v, due, _) = e.update(snap(1000, vec![interrupted, local]), &st);
+        assert!(due.is_empty());
+        let by = |pid: i32| v.iter().find(|s| s.pid == pid).unwrap();
+        assert_eq!(by(1).state, SessionState::Blue);
+        assert_eq!(by(1).reason, Reason::Interrupted);
+        assert_eq!(by(2).state, SessionState::Blue);
+        assert_eq!(by(2).reason, Reason::Ready);
+    }
+
+    /// A retryable API error is a stall: green with a countdown inside tmux,
+    /// red when nothing can press Enter. A 400 is red either way, and Enter
+    /// is never scheduled for it.
+    #[test]
+    fn retryable_api_error_counts_down_fatal_api_error_is_red() {
+        let st = Settings {
+            wait_secs: 100,
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let mut dropped = session(1, "assistant", 30);
+        dropped.turn_complete = true;
+        dropped.api_error = true;
+        dropped.api_error_retryable = true;
+        let (v, due, evs) = e.update(snap(1000, vec![dropped]), &st);
+        assert_eq!(v[0].state, SessionState::Green);
+        assert_eq!(v[0].reason, Reason::ApiError);
+        assert_eq!(waiting_remaining(&v[0]), Some(100));
+        assert!(due.is_empty());
+        assert!(evs.is_empty(), "{evs:?}");
+
+        let mut bad = session(2, "assistant", 30);
+        bad.turn_complete = true;
+        bad.api_error = true;
+        bad.api_error_retryable = false;
+        bad.tmux = None;
+        let mut e2 = Engine::new();
+        let (v, due, evs) = e2.update(snap(1000, vec![bad]), &st);
+        assert_eq!(v[0].state, SessionState::Red);
+        assert_eq!(v[0].reason, Reason::ApiError);
+        assert!(v[0].countdown.is_none(), "Enter cannot fix a 400");
+        assert!(due.is_empty());
+        assert_eq!(evs[0].kind, EventKind::TurnedRed);
+    }
+
+    #[test]
+    fn goal_notices_and_plan_approval() {
+        let st = Settings::default();
+        let mut e = Engine::new();
+        let mut retrying = session(1, "assistant", 40);
+        retrying.api_error = true;
+        retrying.api_error_retryable = true;
+        retrying.system_notice = "retrying".into();
+        let mut paused = session(2, "assistant", 40);
+        paused.turn_complete = true;
+        paused.system_notice = "goal_paused".into();
+        let mut plan = session(3, "assistant", 40);
+        plan.tool_running = true;
+        plan.tool_name = "ExitPlanMode".into();
+        // first sight of an ask does not notify
+        let (v, due, evs) = e.update(snap(1000, vec![retrying, paused, plan]), &st);
+        assert!(due.is_empty());
+        assert!(evs.is_empty(), "{evs:?}");
+        let by = |pid: i32| v.iter().find(|s| s.pid == pid).unwrap();
+        assert_eq!(
+            (by(1).state, by(1).reason),
+            (SessionState::Green, Reason::ApiRetrying)
+        );
+        assert_eq!(
+            (by(2).state, by(2).reason),
+            (SessionState::Yellow, Reason::GoalPaused)
+        );
+        assert_eq!(
+            (by(3).state, by(3).reason),
+            (SessionState::Yellow, Reason::WaitingApproval)
+        );
+
+        // leaving the ask and coming back notifies once. Keep every pid, or
+        // the ones that vanished would report Exited.
+        let (_, _, evs) = e.update(
+            snap(
+                1010,
+                vec![
+                    session(1, "assistant", 2),
+                    session(2, "assistant", 2),
+                    session(3, "assistant", 2),
+                ],
+            ),
+            &st,
+        );
+        assert!(evs.is_empty(), "{evs:?}");
+        let mut paused = session(2, "assistant", 50);
+        paused.system_notice = "goal_paused".into();
+        let (_, _, evs) = e.update(
+            snap(
+                1020,
+                vec![
+                    session(1, "assistant", 2),
+                    paused,
+                    session(3, "assistant", 2),
+                ],
+            ),
+            &st,
+        );
+        assert_eq!(evs.len(), 1, "{evs:?}");
+        assert_eq!(evs[0].kind, EventKind::NeedsInput);
+        assert_eq!(evs[0].pid, 2);
     }
 }

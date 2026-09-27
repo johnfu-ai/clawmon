@@ -74,6 +74,31 @@ pub struct RawSession {
     /// signal that the wait is on subagents, not on the user.
     #[serde(default)]
     pub subagent_idle_sec: Option<i64>,
+    /// what a trailing user record is: "prompt", "tool_result",
+    /// "interrupt", "local_command", "meta", or "" when the last turn is
+    /// not a user record. Only "prompt" and "tool_result" are waiting on
+    /// the model.
+    #[serde(default)]
+    pub user_kind: String,
+    /// the last turn is an API error that is not a usage-quota 429
+    #[serde(default)]
+    pub api_error: bool,
+    /// that error is one pressing Enter might get past (connection lost,
+    /// 5xx, 529, non-quota 429, timeout). False for 400/401/403/404 and
+    /// for anything we cannot recognise as retryable.
+    #[serde(default)]
+    pub api_error_retryable: bool,
+    /// a goal-status line after the turn: "retrying" (claude will try
+    /// again), "goal_paused" (it asked the user to send a message), or ""
+    #[serde(default)]
+    pub system_notice: String,
+    /// utime+stime ticks per second since the previous resident scan.
+    /// None in one-shot mode and on the first sighting of a pid — the
+    /// engine then classifies from the transcript alone. Idle at the
+    /// prompt measures under 2; a streaming turn measures 10–25
+    /// (Claude Code 2.1.280, CLK_TCK 100, 2026-09-27).
+    #[serde(default)]
+    pub cpu_ticks_per_sec: Option<f64>,
 }
 
 fn trusted() -> bool {
@@ -259,6 +284,11 @@ mod tests {
         assert!(!st.sessions[0].turn_complete);
         assert!(!st.sessions[0].thinking);
         assert!(st.sessions[0].usage.is_none());
+        assert!(st.sessions[0].user_kind.is_empty());
+        assert!(!st.sessions[0].api_error);
+        assert!(!st.sessions[0].api_error_retryable);
+        assert!(st.sessions[0].system_notice.is_empty());
+        assert!(st.sessions[0].cpu_ticks_per_sec.is_none());
         // an older detector has no tmux session list — defaults empty
         assert!(st.tmux_sessions.is_empty());
     }
@@ -779,6 +809,313 @@ print(json.dumps({
         assert_eq!(got["auth"]["usage_limited"], false, "{got}");
     }
 
+    /// The tail shapes the lights depend on, beyond "user" / "assistant":
+    /// an interrupt and a local command are not prompts waiting on the API,
+    /// a tool result is, a quota 429 is not a generic API error, a dropped
+    /// connection is retryable while a 400 is not, and a goal notice after
+    /// the turn says who the session is waiting on. ExitPlanMode is a
+    /// pending tool like any other — the engine decides it needs the user.
+    /// (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_classifies_interrupts_errors_and_notices() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+detect_path, work = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+def write(name, records):
+    path = os.path.join(work, name)
+    with open(path, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    return path
+
+def user(text, **extra):
+    rec = {"type": "user", "timestamp": "2026-09-27T01:00:00Z",
+           "sessionId": "s",
+           "message": {"role": "user", "content": text}}
+    rec.update(extra)
+    return rec
+
+def assistant(text, **extra):
+    rec = {"type": "assistant", "timestamp": "2026-09-27T01:00:00Z",
+           "sessionId": "s",
+           "message": {"content": [{"type": "text", "text": text}]}}
+    rec.update(extra)
+    return rec
+
+cases = {}
+def put(name, records):
+    cases[name] = mod.last_entry(write(name + ".jsonl", records))
+
+put("interrupt", [user("[Request interrupted by user]")])
+put("stdout", [user("<local-command-stdout>Set model to glm</local-command-stdout>")])
+put("bashout", [user("<bash-stdout>ok</bash-stdout>")])
+put("command", [user("<command-name>/goal</command-name>")])
+put("prompt", [user("please continue the report")])
+put("toolresult", [user([{"type": "tool_result", "tool_use_id": "t1",
+                          "content": "file written"}])])
+put("meta", [user("a session-scoped Stop hook is now active", isMeta=True)])
+put("syslocal", [
+    user("please continue the report"),
+    {"type": "system", "subtype": "local_command",
+     "content": "<local-command-stdout></local-command-stdout>",
+     "timestamp": "2026-09-27T01:00:01Z", "sessionId": "s"},
+])
+put("dropped", [
+    assistant("API Error: Connection lost mid-response. The response above may be incomplete.",
+              isApiErrorMessage=True, error="server_error"),
+    {"type": "system", "subtype": "turn_duration",
+     "timestamp": "2026-09-27T01:00:02Z", "sessionId": "s"},
+])
+put("badrequest", [
+    assistant("API Error: 400 [1213][未正常接收到prompt参数。]",
+              isApiErrorMessage=True, error="unknown", apiErrorStatus=400),
+])
+put("overloaded", [
+    assistant("API Error: Overloaded", isApiErrorMessage=True, apiErrorStatus=529),
+])
+put("server", [
+    assistant("API Error: 500 internal", isApiErrorMessage=True, apiErrorStatus=500),
+])
+put("quota", [
+    assistant("API Error: 429 usage limit reached. 您的限额将在 2026-09-19 16:21:07 重置。",
+              isApiErrorMessage=True, error="rate_limit", apiErrorStatus=429),
+])
+put("paused", [
+    assistant("done for now"),
+    {"type": "system", "subtype": "turn_duration",
+     "timestamp": "2026-09-27T01:00:02Z", "sessionId": "s"},
+    {"type": "system", "subtype": "informational",
+     "content": "Goal paused · the goal check timed out · send a message to continue",
+     "timestamp": "2026-09-27T01:00:03Z", "sessionId": "s"},
+])
+put("retrying", [
+    assistant("API Error: Connection lost mid-response.",
+              isApiErrorMessage=True, error="server_error"),
+    {"type": "system", "subtype": "informational",
+     "content": "Goal still active · the API was unavailable · retrying in 1 min (1/3)",
+     "timestamp": "2026-09-27T01:00:03Z", "sessionId": "s"},
+])
+put("plan", [
+    {"type": "assistant", "timestamp": "2026-09-27T01:00:00Z", "sessionId": "s",
+     "message": {"content": [{"type": "tool_use", "name": "ExitPlanMode", "id": "t",
+                              "input": {}}]}},
+])
+print(json.dumps(cases))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let work = tmp.path().join("work");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        fs::create_dir(&work).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        let kind = |name: &str| got[name]["user_kind"].as_str().unwrap_or("").to_string();
+        assert_eq!(kind("interrupt"), "interrupt", "{got}");
+        assert_eq!(kind("stdout"), "local_command", "{got}");
+        assert_eq!(kind("bashout"), "local_command", "{got}");
+        assert_eq!(
+            kind("command"),
+            "prompt",
+            "a bare command name still gets a model reply: {got}"
+        );
+        assert_eq!(kind("prompt"), "prompt", "{got}");
+        assert_eq!(kind("toolresult"), "tool_result", "{got}");
+        assert_eq!(kind("meta"), "meta", "{got}");
+        assert_eq!(kind("syslocal"), "local_command", "{got}");
+        assert_eq!(
+            kind("dropped"),
+            "",
+            "assistant turns have no user_kind: {got}"
+        );
+
+        let api = |name: &str| {
+            (
+                got[name]["api_error"].as_bool().unwrap_or(false),
+                got[name]["api_error_retryable"].as_bool().unwrap_or(false),
+                got[name]["usage_limited"].as_bool().unwrap_or(false),
+            )
+        };
+        assert_eq!(api("dropped"), (true, true, false), "{got}");
+        assert_eq!(api("badrequest"), (true, false, false), "{got}");
+        assert_eq!(api("overloaded"), (true, true, false), "{got}");
+        assert_eq!(api("server"), (true, true, false), "{got}");
+        assert_eq!(
+            api("quota"),
+            (false, false, true),
+            "a quota 429 stays the usage-limit path: {got}"
+        );
+        assert_eq!(api("prompt"), (false, false, false), "{got}");
+
+        assert_eq!(got["paused"]["system_notice"], "goal_paused", "{got}");
+        assert_eq!(got["retrying"]["system_notice"], "retrying", "{got}");
+        assert_eq!(got["prompt"]["system_notice"], "", "{got}");
+
+        assert_eq!(got["plan"]["tool_running"], true, "{got}");
+        assert_eq!(got["plan"]["tool_name"], "ExitPlanMode", "{got}");
+    }
+
+    /// A single transcript line can be larger than the 64KB tail window (a
+    /// big attachment). Starting the read inside that line used to discard
+    /// everything before it, including the turn the trailer belongs to, so
+    /// the session looked like it had no record at all.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn last_entry_sees_the_turn_behind_a_huge_line() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+detect_path, path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+big = "x" * (80 * 1024)
+with open(path, "w") as f:
+    f.write(json.dumps({
+        "type": "assistant", "timestamp": "2026-09-27T01:00:00Z",
+        "sessionId": "s",
+        "message": {"content": [{"type": "text", "text": "Done — wrote the report."}]},
+    }) + "\n")
+    f.write(json.dumps({
+        "type": "attachment", "timestamp": "2026-09-27T01:00:01Z",
+        "sessionId": "s", "attachment": {"type": "file", "body": big},
+    }) + "\n")
+    f.write(json.dumps({
+        "type": "system", "subtype": "turn_duration",
+        "timestamp": "2026-09-27T01:00:02Z", "sessionId": "s",
+    }) + "\n")
+print(json.dumps(mod.last_entry(path)))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        let path = tmp.path().join("huge.jsonl");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let entry: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("last_entry JSON");
+        assert_eq!(entry["type"], "assistant", "{entry}");
+        assert_eq!(entry["turn_complete"], true, "{entry}");
+        assert_eq!(entry["preview"], "Done — wrote the report.", "{entry}");
+    }
+
+    /// Resident mode reports how busy the claude process has been since the
+    /// previous scan; one-shot mode and the first sighting have nothing to
+    /// subtract, so they report nothing. Measured idle-at-prompt is ~2
+    /// ticks/s and a streaming turn is 10–25, so a rate the engine can
+    /// threshold is the whole contract — the number itself comes from
+    /// /proc. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn cpu_rate_is_resident_only_and_needs_two_samples() {
+        const DRIVER: &str = r#"
+import importlib.util, os, sys, time
+detect_path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+pid = os.getpid()
+mod._SERVE = False
+mod._cpu_prev.clear()
+one_shot = mod.cpu_rate(pid)
+
+mod._SERVE = True
+mod._cpu_prev.clear()
+first = mod.cpu_rate(pid)
+
+# 25 ticks behind, 5 s ago → 5 ticks/s, plus a little real work
+with open("/proc/%d/stat" % pid) as f:
+    st = f.read().rsplit(") ", 1)[1].split()
+now_ticks = int(st[11]) + int(st[12])
+mod._cpu_prev[pid] = (now_ticks - 25, time.monotonic() - 5.0)
+second = mod.cpu_rate(pid)
+
+# a pid we have never seen, and a sample that went backwards (pid reuse)
+missing = mod.cpu_rate(2**30)
+mod._cpu_prev[pid] = (now_ticks + 10_000, time.monotonic() - 5.0)
+rewound = mod.cpu_rate(pid)
+
+import json
+print(json.dumps({
+    "one_shot": one_shot,
+    "first": first,
+    "second": second,
+    "missing": missing,
+    "rewound": rewound,
+}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([driver.to_str().unwrap(), script.to_str().unwrap()])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got: serde_json::Value = serde_json::from_slice(&out.stdout).expect("cpu_rate JSON");
+        assert!(
+            got["one_shot"].is_null(),
+            "one-shot has no previous sample: {got}"
+        );
+        assert!(
+            got["first"].is_null(),
+            "the first resident sighting has no delta: {got}"
+        );
+        let second = got["second"].as_f64().expect("a delta is a rate");
+        assert!(
+            (3.0..30.0).contains(&second),
+            "25 ticks over 5 s is about 5 ticks/s: {got}"
+        );
+        assert!(got["missing"].is_null(), "{got}");
+        assert!(
+            got["rewound"].is_null(),
+            "a backwards counter is a new process: {got}"
+        );
+    }
+
     /// Live smoke test (only meaningful inside WSL).
     #[test]
     #[cfg(target_os = "linux")]
@@ -1137,6 +1474,298 @@ print(json.dumps({
         assert_eq!(
             result["picked"], "new00000-0000-0000-0000-000000000002.jsonl",
             "the process must follow the compact continuation, not the retired file: {result}"
+        );
+    }
+
+    /// Regression (observed live 2026-09-27, session "rag"): claude was
+    /// running, but the row showed yellow "记录未就绪". The process had been
+    /// paired with the PREVIOUS session's transcript — closed by `/exit`
+    /// two minutes before this process started — because that file's first
+    /// timestamp was the closest match inside the 300 s window. The real
+    /// transcript was born later (a fresh session writes nothing until the
+    /// first prompt). A file last written before the process existed cannot
+    /// be its transcript. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pairing_skips_transcript_closed_before_process_start() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+
+detect_path, root = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+projects = os.path.join(root, "projects")
+mod.CLAUDE_DIR = projects
+ts = mod.parse_ts
+d = os.path.join(projects, "-home-john-rag")
+os.makedirs(d)
+
+def write(name, records, mtime):
+    p = os.path.join(d, name)
+    with open(p, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    os.utime(p, (mtime, mtime))
+
+def user(t, text):
+    return {"type": "user", "timestamp": t, "sessionId": "x",
+            "message": {"role": "user", "content": text}}
+
+# the photographed gaps: dead file's first entry is 137 s BEFORE the
+# process start, the live file's is 173 s AFTER. Closest-absolute-match
+# inside 300 s picks the dead one. Its mtime is the /exit at 00:41:23,
+# two minutes before the process (00:43:36). The /exit records are
+# timestamped, so the last line is not an untimestamped close-out.
+write("abbe9513-2e26-41fc-a0de-2fc3bb5d7225.jsonl", [
+    user("2026-09-27T00:41:19Z", "earlier session"),
+    {"type": "cost-state", "sessionId": "abbe"},
+    user("2026-09-27T00:41:23Z",
+         "<local-command-stdout>Bye!</local-command-stdout>"),
+], ts("2026-09-27T00:41:23Z"))
+
+write("556dd051-573b-437b-be69-0ab612009c7d.jsonl", [
+    {"type": "mode", "sessionId": "live"},
+    user("2026-09-27T00:46:29Z", "the real first prompt"),
+    {"type": "assistant", "timestamp": "2026-09-27T00:58:10Z",
+     "sessionId": "live",
+     "message": {"content": [{"type": "text", "text": "working"}]}},
+], ts("2026-09-27T00:58:10Z"))
+
+procs = [{"pid": 4263, "cmd": ["claude", "--permission-mode", "bypassPermissions"],
+          "cwd": "/home/john/rag", "tty": "/dev/pts/0", "tmux": None,
+          "start": ts("2026-09-27T00:43:36Z")}]
+mapping = mod.assign_transcripts(procs)
+picked = mapping[4263]
+print(json.dumps({"picked": os.path.basename(picked) if picked else None}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("driver printed its verdict");
+        assert_eq!(
+            result["picked"], "556dd051-573b-437b-be69-0ab612009c7d.jsonl",
+            "a transcript last written before the process started is not its transcript: {result}"
+        );
+    }
+
+    /// `/exit` retires a transcript with `cost-state` and THEN timestamped
+    /// local-command records ("Bye!"), so the last line is timestamped and
+    /// the old "untimestamped trailer" check does not see a close-out. The
+    /// file's mtime is after the process start (the session was closed
+    /// mid-flight and a new transcript took over), so the mtime filter does
+    /// not save it either. A real prompt after `cost-state` means the file
+    /// continued — that one stays put. (Linux only; needs a real python3.)
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pairing_treats_cost_state_plus_exit_records_as_retired() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+
+detect_path, root = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+projects = os.path.join(root, "projects")
+mod.CLAUDE_DIR = projects
+ts = mod.parse_ts
+
+def write(slug, name, records, mtime):
+    d = os.path.join(projects, slug)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, name)
+    with open(p, "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    os.utime(p, (mtime, mtime))
+
+def user(t, text):
+    return {"type": "user", "timestamp": t, "sessionId": "x",
+            "message": {"role": "user", "content": text}}
+
+# closed by /exit: cost-state, then timestamped local-command lines.
+# mtime is after the process start, so only the retirement check can
+# hand the process over to the continuation.
+ex = "-tmp-exit"
+write(ex, "old00000-0000-0000-0000-000000000001.jsonl", [
+    user("2026-09-13T13:00:00Z", "the session"),
+    {"type": "cost-state", "sessionId": "old"},
+    user("2026-09-13T13:10:00Z",
+         "<command-name>/exit</command-name>"),
+    user("2026-09-13T13:10:01Z",
+         "<local-command-stdout>Bye!</local-command-stdout>"),
+], ts("2026-09-13T13:10:01Z"))
+write(ex, "new00000-0000-0000-0000-000000000002.jsonl", [
+    user("2026-09-13T13:12:00Z", "continued"),
+], ts("2026-09-13T13:20:00Z"))
+
+# cost-state followed by a REAL prompt: the file continued, and a newer
+# neighbour must not be adopted
+kept = "-tmp-kept"
+write(kept, "keep0000-0000-0000-0000-000000000003.jsonl", [
+    user("2026-09-13T12:00:00Z", "the session"),
+    {"type": "cost-state", "sessionId": "keep"},
+    user("2026-09-13T12:30:00Z", "a real follow-up prompt"),
+], ts("2026-09-13T12:40:00Z"))
+write(kept, "neigh000-0000-0000-0000-000000000004.jsonl", [
+    user("2026-09-13T12:35:00Z", "someone else"),
+], ts("2026-09-13T12:36:00Z"))
+
+procs = [
+    {"pid": 401, "cmd": ["claude"], "cwd": "/tmp/exit",
+     "tty": "", "tmux": None, "start": ts("2026-09-13T13:00:05Z")},
+    {"pid": 402, "cmd": ["claude"], "cwd": "/tmp/kept",
+     "tty": "", "tmux": None, "start": ts("2026-09-13T12:00:05Z")},
+]
+mapping = mod.assign_transcripts(procs)
+print(json.dumps({str(k): os.path.basename(v) if v else None
+                  for k, v in mapping.items()}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mapping: std::collections::HashMap<String, Option<String>> =
+            serde_json::from_slice(&out.stdout).expect("driver printed the mapping");
+        assert_eq!(
+            mapping.get("401").unwrap().as_deref(),
+            Some("new00000-0000-0000-0000-000000000002.jsonl"),
+            "/exit after cost-state is a retirement; follow the continuation"
+        );
+        assert_eq!(
+            mapping.get("402").unwrap().as_deref(),
+            Some("keep0000-0000-0000-0000-000000000003.jsonl"),
+            "a real prompt after cost-state means the transcript continued"
+        );
+    }
+
+    /// `claude --resume <uuid>` (and `-r`) names the transcript exactly, the
+    /// same way `--session-id` does. A newer file in the same directory must
+    /// not win. A `--resume <path>` still points at that file.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pairing_honors_resume_uuid_and_path() {
+        const DRIVER: &str = r#"
+import importlib.util, json, os, sys
+
+detect_path, root = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+projects = os.path.join(root, "projects")
+mod.CLAUDE_DIR = projects
+d = os.path.join(projects, "-tmp-x")
+os.makedirs(d)
+uid = "dddd0000-0000-0000-0000-000000000004"
+with open(os.path.join(d, uid + ".jsonl"), "w") as f:
+    f.write('{"type":"user","timestamp":"2026-09-13T00:00:00Z","sessionId":"resumed"}\n')
+with open(os.path.join(d, "eeee0000-0000-0000-0000-000000000005.jsonl"), "w") as f:
+    f.write('{"type":"user","timestamp":"2026-09-27T00:00:00Z","sessionId":"newer"}\n')
+
+# -r <uuid> in a different project dir
+d2 = os.path.join(projects, "-tmp-y")
+os.makedirs(d2)
+uid2 = "ffff0000-0000-0000-0000-000000000006"
+with open(os.path.join(d2, uid2 + ".jsonl"), "w") as f:
+    f.write('{"type":"user","timestamp":"2026-09-13T00:00:00Z","sessionId":"short"}\n')
+
+# --resume <path> points outside the project dir
+outside = os.path.join(root, "explicit.jsonl")
+with open(outside, "w") as f:
+    f.write('{"type":"user","timestamp":"2026-09-13T00:00:00Z","sessionId":"path"}\n')
+
+procs = [
+    {"pid": 501, "cmd": ["claude", "--resume", uid],
+     "cwd": "/tmp/x", "tty": "", "tmux": None, "start": None},
+    {"pid": 502, "cmd": ["claude", "-r", uid2],
+     "cwd": "/tmp/y", "tty": "", "tmux": None, "start": None},
+    {"pid": 503, "cmd": ["claude", "--resume", outside],
+     "cwd": "/tmp/x", "tty": "", "tmux": None, "start": None},
+]
+mapping = mod.assign_transcripts(procs)
+print(json.dumps({str(k): v for k, v in mapping.items()}))
+"#;
+        use std::fs;
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("detect.py");
+        let driver = tmp.path().join("driver.py");
+        fs::write(&script, DETECT_SCRIPT).unwrap();
+        fs::write(&driver, DRIVER).unwrap();
+        let out = Command::new("python3")
+            .args([
+                driver.to_str().unwrap(),
+                script.to_str().unwrap(),
+                tmp.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        assert!(
+            out.status.success(),
+            "driver failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mapping: std::collections::HashMap<String, Option<String>> =
+            serde_json::from_slice(&out.stdout).expect("driver printed the mapping");
+        let base = |pid: &str| {
+            mapping
+                .get(pid)
+                .and_then(|v| v.as_deref())
+                .map(|p| p.rsplit('/').next().unwrap().to_string())
+        };
+        assert_eq!(
+            base("501").as_deref(),
+            Some("dddd0000-0000-0000-0000-000000000004.jsonl"),
+            "--resume <uuid> names the transcript"
+        );
+        assert_eq!(
+            base("502").as_deref(),
+            Some("ffff0000-0000-0000-0000-000000000006.jsonl"),
+            "-r <uuid> names the transcript"
+        );
+        let expected_path = tmp.path().join("explicit.jsonl");
+        let expected_path = expected_path.to_string_lossy();
+        assert_eq!(
+            mapping.get("503").unwrap().as_deref(),
+            Some(expected_path.as_ref()),
+            "--resume <path> still points at that file"
         );
     }
 

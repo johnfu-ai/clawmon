@@ -34,15 +34,18 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// UI and notification language: "zh" (default) or "en".
     pub language: String,
-    /// Desktop notification when a session turns red.
+    /// Desktop notification when a session turns red — only a person can fix it.
     pub notify_red: bool,
     /// Desktop notification when resume keys were sent automatically.
     pub notify_continue: bool,
-    /// Desktop notification when a red session recovers on its own.
+    /// Desktop notification when a stall (or a red episode) ends on its own.
     pub notify_recovered: bool,
     /// Desktop notification when a session finishes its turn and waits for
     /// the user's next instruction.
     pub notify_turn_end: bool,
+    /// Desktop notification when a session parks on a question, a plan
+    /// approval, or a paused goal.
+    pub notify_input: bool,
     /// Desktop notification when a claude process exits.
     pub notify_exit: bool,
     /// Play a system sound alongside the notifications above.
@@ -70,6 +73,7 @@ impl Default for Settings {
             notify_continue: true,
             notify_recovered: true,
             notify_turn_end: false,
+            notify_input: true,
             notify_exit: true,
             sound_alerts: true,
             show_glm_usage: true,
@@ -198,6 +202,7 @@ mod tests {
         assert_eq!(s.idle_green_secs, 5);
         assert_eq!(s.idle_subagent_secs, 5);
         assert_eq!(s.blocked_after_secs, 86_400);
+        assert!(s.notify_input, "a missing switch stays on");
     }
 
     #[test]

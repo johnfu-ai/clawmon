@@ -24,10 +24,11 @@ const T = {
   "set.retry": ["重试间隔（分钟）", "Retry interval (minutes)"],
   "set.distro": ["WSL 发行版（留空 = 默认）", "WSL distro (empty = default)"],
   "set.notify": ["桌面通知", "Desktop notifications"],
-  "set.notify.red": ["会话变红时", "When a session turns red"],
+  "set.notify.red": ["会话需要你处理时", "When a session needs you"],
   "set.notify.continue": ["自动继续已发送时", "When resume keys were sent"],
-  "set.notify.recovered": ["红灯解除时", "When a red session recovers"],
-  "set.notify.turn": ["回合结束等待输入时", "When a turn finishes, waiting for input"],
+  "set.notify.recovered": ["异常解除时", "When a stuck session recovers"],
+  "set.notify.turn": ["回合结束时", "When a turn finishes"],
+  "set.notify.input": ["需要你输入时", "When a session needs your input"],
   "set.notify.exit": ["会话进程退出时", "When a session process exits"],
   "set.sound": ["提示音（伴随通知）", "Alert sound with notifications"],
   "set.usage": ["显示 GLM 套餐用量（底部状态栏）", "Show GLM plan usage (status bar)"],
@@ -46,24 +47,32 @@ const T = {
   "foot.bad": ["WSL 连接异常", "WSL connection error"],
   "foot.fail": ["查询失败", "Query failed"],
 
-  /* session rows — green = no action needed, blue = turn complete,
-     yellow = blocked on the user */
-  "sum": ["● {g} 正常 · ● {b} 已完成 · ● {y} 待你输入 · ● {r} 超时",
-    "● {g} OK · ● {b} done · ● {y} awaiting you · ● {r} stuck"],
+  /* session rows — green = no action needed (including an auto-continue
+     countdown), blue = turn complete or ready at the prompt,
+     yellow = the user must provide input or we cannot tell,
+     red = only a person can fix it */
+  "sum": ["● {g} 正常 · ● {b} 已完成 · ● {y} 待你输入 · ● {r} 需处理",
+    "● {g} OK · ● {b} done · ● {y} awaiting you · ● {r} needs you"],
   /* the engine's classification tags (SessionView.reason, snake_case) —
      keying on the tag keeps the vocabulary owned by the state machine that
      produces it; a forgotten entry shows the raw key instead of the wrong
      language */
   "reason.active": ["运行中", "Running"],
   "reason.no_transcript": ["未找到记录", "No transcript"],
-  "reason.transcript_stale": ["记录未就绪", "Transcript not ready"],
+  "reason.transcript_stale": ["无法确认状态", "State unknown"],
   "reason.tool_running": ["工具运行中", "Tool running"],
   "reason.waiting_subagent": ["等待 Subagent", "Waiting for subagent"],
   "reason.turn_complete": ["回合完成", "Turn complete"],
   "reason.waiting_input": ["等待输入", "Waiting for input"],
+  "reason.waiting_approval": ["等待计划确认", "Waiting for plan approval"],
+  "reason.goal_paused": ["目标已暂停", "Goal paused"],
   "reason.waiting_response": ["等待 API 响应", "Waiting for API"],
   "reason.response_timed_out": ["疑似 API 超时", "Likely API timeout"],
   "reason.usage_limited": ["额度已用尽", "Usage limit reached"],
+  "reason.api_error": ["API 错误", "API error"],
+  "reason.api_retrying": ["API 重试中", "API retrying"],
+  "reason.interrupted": ["已中断", "Interrupted"],
+  "reason.ready": ["待命", "Ready"],
   "idle.sec": ["{n} 秒", "{n}s"],
   "idle.min": ["{n} 分钟", "{n} min"],
   "idle.hour": ["{h} 小时 {m} 分", "{h} h {m} min"],
@@ -144,7 +153,7 @@ const T = {
   "pet.green": ["一切正常", "All good"],
   "pet.blue": ["有会话已完成回合", "A session finished its turn"],
   "pet.yellow": ["有会话在等你输入", "Sessions awaiting your input"],
-  "pet.red": ["有会话疑似卡死", "Session may be stuck"],
+  "pet.red": ["有会话需要你处理", "A session needs you"],
   "pet.off": ["WSL 连接异常", "WSL unreachable"],
   "pet.click": ["点击打开主窗口", "click to open the main window"],
 };

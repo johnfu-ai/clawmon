@@ -431,6 +431,11 @@ mod tests {
             usage_limited: false,
             resume_at: None,
             subagent_idle_sec: None,
+            user_kind: String::new(),
+            api_error: false,
+            api_error_retryable: false,
+            system_notice: String::new(),
+            cpu_ticks_per_sec: None,
         }
     }
 

@@ -290,6 +290,47 @@ def proc_start_epoch(pid):
         return None
 
 
+def proc_cpu_ticks(pid):
+    """utime + stime (fields 14 and 15), or None if the process is gone."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            st = f.read().rsplit(") ", 1)[1].split()
+        return int(st[11]) + int(st[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+# Resident mode keeps the previous sample so a poll can report ticks/s.
+# One-shot mode has no previous sample and always reports None — the
+# engine then classifies from the transcript alone.
+_SERVE = False
+_cpu_prev = {}
+
+
+def cpu_rate(pid):
+    """Ticks/s of user+system time since the previous resident scan.
+
+    None in one-shot mode, on the first sighting of a pid, when the
+    counter went backwards (the pid was reused), and when /proc cannot
+    be read. Measured on Claude Code 2.1.280 (CLK_TCK 100): idle at the
+    prompt is 0–2 ticks/s; a streaming turn is 10–25.
+    """
+    now_ticks = proc_cpu_ticks(pid)
+    now = time.monotonic()
+    if not _SERVE or now_ticks is None:
+        if now_ticks is None:
+            _cpu_prev.pop(pid, None)
+        return None
+    prev = _cpu_prev.get(pid)
+    _cpu_prev[pid] = (now_ticks, now)
+    if prev is None or now_ticks < prev[0]:
+        return None
+    dt = now - prev[1]
+    if dt <= 0.05:
+        return None
+    return (now_ticks - prev[0]) / dt
+
+
 _first_ts_cache = {}
 
 
@@ -388,15 +429,76 @@ def scan_transcripts():
     return files
 
 
+# A transcript may be timestamped a little before /proc says the process
+# started (clock granularity, the first write racing the stat read). Wider
+# than that, a file was born with a different process.
+_BIRTH_BEFORE_SECS = 30
+# And the first entry lands within seconds of spawn when the session
+# starts by being prompted. Later than this, "born with the process" is
+# no longer the story — see choose_transcript.
+_BIRTH_AFTER_SECS = 15
+# mtime is second-resolution and can lag the start we read from /proc.
+_MTIME_SLOP_SECS = 5
+
+
+def file_mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def written_since_start(path, start):
+    """False when the file was last written before this process existed.
+
+    Such a file cannot be its transcript: the fallback heuristics used to
+    hand a fresh process the previous session (closed by /exit a couple of
+    minutes earlier) because that file's first timestamp was the closest
+    match, and the row then stuck on yellow "记录未就绪".
+    """
+    if not start:
+        return True
+    mtime = file_mtime(path)
+    return mtime is not None and mtime >= start - _MTIME_SLOP_SECS
+
+
+def choose_transcript(start, free):
+    """Which of `free` belongs to the process that started at `start`.
+
+    1. Born with the process — first timestamp within a few seconds of the
+       start. That file beats a neighbour that started later in the same
+       directory (an idle session must keep its own transcript).
+    2. Otherwise a file born after the start, nearest first. No window cap:
+       a fresh session writes nothing until the first prompt, which can be
+       many minutes after the process.
+    3. Otherwise the newest mtime — a resumed session whose transcript
+       predates the process but is still being written.
+    """
+    if start and len(free) > 1:
+        def gap(f):
+            ft = first_ts_epoch(f)
+            return None if ft is None else ft - start
+
+        born = [f for f in free
+                if gap(f) is not None
+                and -_BIRTH_BEFORE_SECS <= gap(f) <= _BIRTH_AFTER_SECS]
+        if born:
+            return min(born, key=lambda f: abs(gap(f)))
+        after = [f for f in free if gap(f) is not None and gap(f) > 0]
+        if after:
+            return min(after, key=gap)
+    return max(free, key=lambda f: file_mtime(f) or 0)
+
+
 def assign_transcripts(procs):
     """Map each claude process to its own transcript file.
 
     Multiple claude processes can share one working directory, so "newest
     file in the project dir" is not enough. Resolution order:
       1. `--session-id <uuid>` in the cmdline → <uuid>.jsonl (exact)
-      2. `--resume <path>` in the cmdline → that file
-      3. candidates in the project dir, pairing each process with the file
-         whose first timestamped entry best matches the process start time
+      2. `--resume` / `-r` <path or uuid> in the cmdline → that file
+      3. candidates in the project dir that were still being written when
+         the process started (see `choose_transcript`)
       4. fallback: newest unclaimed file (then the cwd tail-match scan)
     Files are claimed so no two processes share a transcript.
     Returns {pid: transcript_path or None}.
@@ -414,9 +516,14 @@ def assign_transcripts(procs):
             if os.path.isfile(cand):
                 t = cand
         if t is None:
-            res = cmd_opt(p["cmd"], "--resume")
+            res = cmd_opt(p["cmd"], "--resume") or cmd_opt(p["cmd"], "-r")
             if res and os.path.isfile(res):
                 t = res
+            elif res and p["cwd"]:
+                cand = os.path.join(
+                    CLAUDE_DIR, slug_for(p["cwd"]), res + ".jsonl")
+                if os.path.isfile(cand):
+                    t = cand
         if t is not None:
             claimed.add(t)
             result[p["pid"]] = t
@@ -435,20 +542,13 @@ def assign_transcripts(procs):
         # newest process first: it is the most likely to still be writing
         group.sort(key=lambda p: p["start"] or 0, reverse=True)
         for p in group:
-            if not free:
-                break
-            pick = None
-            if len(free) > 1 and p["start"]:
-                # prefer the file whose first entry best matches the
-                # process start time (fresh sessions start writing
-                # within seconds of spawning)
-                best = min(free, key=lambda f: abs(
-                    (first_ts_epoch(f) or 0) - p["start"]))
-                if first_ts_epoch(best) is not None \
-                        and abs(first_ts_epoch(best) - p["start"]) <= 300:
-                    pick = best
-            if pick is None:
-                pick = max(free, key=os.path.getmtime)
+            # a file quiet since before this process started belongs to an
+            # earlier session; it must not compete (and must not win on
+            # "closest first timestamp")
+            eligible = [f for f in free if written_since_start(f, p["start"])]
+            if not eligible:
+                continue
+            pick = choose_transcript(p["start"], eligible)
             claimed.add(pick)
             free.remove(pick)
             result[p["pid"]] = pick
@@ -471,7 +571,7 @@ def assign_transcripts(procs):
             pick = result.get(p["pid"])
             if not pick:
                 continue
-            if first_ts_epoch(pick) is None or not final_marker_tail(pick):
+            if first_ts_epoch(pick) is None or not is_retired(pick):
                 continue
             try:
                 pick_quiet = os.path.getmtime(pick)
@@ -479,10 +579,12 @@ def assign_transcripts(procs):
                 continue
             takeover, takeover_key = None, None
             for f in free:
+                if not written_since_start(f, p["start"]):
+                    continue
                 f_last = last_ts_epoch(f)
                 if f_last is None or f_last < pick_quiet - 5:
                     continue  # does not outlive the retired file
-                key = (not final_marker_tail(f), f_last)
+                key = (not is_retired(f), f_last)
                 if takeover is None or key > takeover_key:
                     takeover, takeover_key = f, key
             if takeover is not None:
@@ -499,7 +601,7 @@ def assign_transcripts(procs):
         if result[p["pid"]] is not None or not p["cwd"]:
             continue
         for m, f in recent:
-            if f in claimed:
+            if f in claimed or not written_since_start(f, p["start"]):
                 continue
             try:
                 with open(f, "rb") as fh:
@@ -566,27 +668,90 @@ def read_tail(path, window=TAIL_WINDOW, limit=TAIL_WINDOW_MAX):
         window *= 2
 
 
-def final_marker_tail(path):
-    """True when the transcript ends with a session close-out record.
+# Records a local slash command (`/exit`, `/model`, …) appends. They are
+# not a turn the model owes a reply to. `/exit` writes them AFTER the
+# `cost-state` close-out, so "the last line is untimestamped" does not
+# recognise the retirement — those lines are timestamped.
+_LOCAL_COMMAND_MARKERS = (
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<local-command-caveat>",
+    "<command-name>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+)
 
-    /clear (and a clean exit) retire a transcript by appending one last
-    untimestamped meta record (`cost-state`, `atis-latch`, ...); every
-    in-session entry carries a timestamp, so a session still open — even
-    one idle at the prompt — ends on a timestamped one. This is the
-    fingerprint that tells "cleared" apart from "merely idle".
+_retired_cache = {}
+
+
+def entry_text(entry):
+    """Flatten a record's message content to text."""
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return _blocks_text(content)
+    return ""
+
+
+def is_local_command_entry(entry):
+    """True for a slash command claude handled locally, with no model turn."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") == "system" and entry.get("subtype") == "local_command":
+        return True
+    if entry.get("type") != "user":
+        return False
+    text = entry_text(entry)
+    return any(marker in text for marker in _LOCAL_COMMAND_MARKERS)
+
+
+def is_retired(path):
+    """True when the transcript was closed out and not continued.
+
+    `cost-state` is written once, when a session is retired (`/clear`,
+    auto-compact, `/exit`). Untimestamped markers (`mode`, `last-prompt`,
+    `atis-latch`) also appear mid-session, so they are not a close-out.
+    `/exit` appends timestamped local-command records after `cost-state`;
+    those do not reopen the session. A real turn after `cost-state` does.
     """
+    if path in _retired_cache:
+        return _retired_cache[path]
+    retired = _is_retired(path)
+    _retired_cache[path] = retired
+    return retired
+
+
+def _is_retired(path):
     try:
         tail = read_tail(path)
     except OSError:
         return False
-    lines = [l for l in tail.split("\n") if l.strip()]
-    if not lines:
+    parsed = []
+    for line in tail.split("\n"):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            parsed.append(json.loads(line))
+        except Exception:
+            continue
+    idx = None
+    for i, d in enumerate(parsed):
+        if isinstance(d, dict) and d.get("type") == "cost-state":
+            idx = i
+    if idx is None:
         return False
-    try:
-        d = json.loads(lines[-1])
-    except Exception:
-        return False  # mid-write or non-JSON trailer: not a close-out
-    return isinstance(d, dict) and "type" in d and "timestamp" not in d
+    for d in parsed[idx + 1:]:
+        if not isinstance(d, dict):
+            continue
+        # bookkeeping after the close-out (last-prompt, mode, …) is fine;
+        # only a turn entry can mean the session continued
+        if d.get("type") not in ("user", "assistant") or "timestamp" not in d:
+            continue
+        if not is_local_command_entry(d):
+            return False
+    return True
 
 
 # Conversation entries we classify on. Claude Code appends timestamped
@@ -624,6 +789,93 @@ def _blocks_text(content):
     return "\n".join(parts)
 
 
+def notice_kind(text):
+    """A goal-status line claude writes after the turn, or "".
+
+    "retrying" means claude will try again on its own. "goal_paused" means
+    it stopped and asked the user to send a message. Paused wins when a
+    line could be read either way.
+    """
+    if not isinstance(text, str):
+        return ""
+    low = text.lower()
+    if "goal paused" in low or "send a message to continue" in low:
+        return "goal_paused"
+    if "retrying" in low:
+        return "retrying"
+    return ""
+
+
+# Status codes that will not start working because we press Enter.
+_FATAL_API_STATUS = (400, 401, 403, 404)
+_RETRYABLE_TEXT = (
+    "connection lost",
+    "overloaded",
+    "timeout",
+    "timed out",
+    "econnreset",
+    "socket hang up",
+)
+
+
+def parse_api_error(entry, text, usage_limited):
+    """Return (api_error, retryable) for a non-quota API failure.
+
+    A usage-quota 429 stays on the usage-limit path and is not also an
+    API error. Retryable: connection lost, 5xx, 529 overloaded, a
+    non-quota 429, a timeout. 400/401/403/404 are not — pressing Enter
+    cannot fix a rejected request. Anything we cannot recognise as
+    retryable is not: an unknown failure needs a person.
+    """
+    if usage_limited:
+        return False, False
+    status = entry.get("apiErrorStatus")
+    is_api = (
+        bool(entry.get("isApiErrorMessage"))
+        or bool(entry.get("error"))
+        or status is not None
+        or (text or "").lstrip().startswith("API Error:")
+    )
+    if not is_api:
+        return False, False
+    if isinstance(status, int) and status in _FATAL_API_STATUS:
+        return True, False
+    low = (text or "").lower()
+    retryable = False
+    if isinstance(status, int) and (
+            status in (408, 429, 529) or status >= 500):
+        retryable = True
+    if any(marker in low for marker in _RETRYABLE_TEXT) or "529" in low:
+        retryable = True
+    return True, retryable
+
+
+def user_kind_of(entry):
+    """What a trailing user record actually is.
+
+    ``prompt`` is the only kind the model owes a reply to. A bare
+    ``<command-name>`` stays a prompt: skill and prompt commands do get a
+    model reply. The stdout of a local command does not.
+    """
+    if entry.get("type") != "user":
+        return ""
+    text = entry_text(entry)
+    if "Request interrupted by user" in text:
+        return "interrupt"
+    if any(marker in text for marker in (
+            "<local-command-stdout>", "<local-command-stderr>",
+            "<bash-stdout>", "<bash-stderr>", "<local-command-caveat>")):
+        return "local_command"
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in content):
+        return "tool_result"
+    if entry.get("isMeta"):
+        return "meta"
+    return "prompt"
+
+
 def parse_usage_limit(entry, text):
     """Return (usage_limited, resume_at_epoch_or_None) for a quota 429.
 
@@ -657,11 +909,12 @@ def parse_usage_limit(entry, text):
     return True, resume_at
 
 
-def last_entry(path):
+def last_entry(path, window=TAIL_WINDOW):
     """Parse the last complete JSON line of the transcript.
 
     Returns dict with type, timestamp, session_id, preview, tool_running,
-    tool_name, turn_complete, thinking, usage_limited, resume_at.
+    tool_name, turn_complete, thinking, usage_limited, resume_at,
+    user_kind, api_error, api_error_retryable, system_notice.
     `tool_running` is True when the last timestamped *turn* entry is an
     assistant message containing a tool_use block — the tool result is
     only appended when the tool finishes, so this is exactly "a tool is
@@ -674,9 +927,14 @@ def last_entry(path):
     `usage_limited` is True when that last turn is a usage-quota 429
     (Claude Code still writes a trailer, but the goal is paused until
     reset); `resume_at` is the parsed reset epoch, or None.
+    `user_kind` classifies a trailing user record (prompt, tool_result,
+    interrupt, local_command, meta); "" when the last turn is not a user
+    record. `api_error` / `api_error_retryable` describe a non-quota API
+    failure. `system_notice` is "retrying" or "goal_paused" when a
+    goal-status line follows the turn.
     """
     try:
-        tail = read_tail(path)
+        tail = read_tail(path, window=window)
     except OSError:
         return None
     lines = [l for l in tail.split("\n") if l.strip()][-MAX_SCAN_LINES:]
@@ -684,9 +942,12 @@ def last_entry(path):
     session_id = None
     preview = ""
     turn_complete = False
+    system_notice = ""
+    local_command_after = False
     # walk from the end; trailers after the last turn mean it finished.
     # Keep the last user/assistant line as the entry, and also grab the
-    # nearest assistant text for a preview.
+    # nearest assistant text for a preview. System lines between the end
+    # and that turn are the notices, not the turn itself.
     for line in reversed(lines):
         line = line.strip()
         if not line.startswith("{"):
@@ -697,10 +958,19 @@ def last_entry(path):
             continue
         if session_id is None:
             session_id = d.get("sessionId") or d.get("session_id")
-        if entry is None and d.get("type") == "system" \
-                and d.get("subtype") in _TURN_TRAILERS:
-            turn_complete = True
-            continue
+        if entry is None and d.get("type") == "system":
+            subtype = d.get("subtype") or ""
+            if subtype in _TURN_TRAILERS:
+                turn_complete = True
+                continue
+            if subtype == "local_command":
+                local_command_after = True
+                continue
+            if subtype in ("informational", "api_error"):
+                kind = notice_kind(d.get("content") or "")
+                if kind and not system_notice:
+                    system_notice = kind
+                continue
         if entry is None and d.get("type") in _TURN_TYPES and "timestamp" in d:
             entry = d
         if not preview and d.get("type") == "assistant":
@@ -715,6 +985,11 @@ def last_entry(path):
         if entry is not None and preview:
             break
     if entry is None:
+        # A line bigger than the window (a large attachment) makes the read
+        # start mid-line and drop the turn that sits just before it. Widen
+        # and try again, up to the cap.
+        if window < TAIL_WINDOW_MAX:
+            return last_entry(path, window=min(window * 2, TAIL_WINDOW_MAX))
         return None
     tool_running = False
     tool_name = ""
@@ -738,9 +1013,14 @@ def last_entry(path):
                     has_thinking = True
         thinking = (not tool_running) and has_thinking and not has_text
     usage_limited, resume_at = False, None
+    api_error, api_retryable = False, False
     if entry.get("type") == "assistant":
         full = _blocks_text((entry.get("message") or {}).get("content") or [])
         usage_limited, resume_at = parse_usage_limit(entry, full)
+        api_error, api_retryable = parse_api_error(entry, full, usage_limited)
+    user_kind = user_kind_of(entry)
+    if local_command_after:
+        user_kind = "local_command"
     return {
         "type": entry.get("type", ""),
         "timestamp": entry.get("timestamp", ""),
@@ -752,6 +1032,10 @@ def last_entry(path):
         "thinking": thinking,
         "usage_limited": usage_limited,
         "resume_at": resume_at,
+        "user_kind": user_kind,
+        "api_error": api_error,
+        "api_error_retryable": api_retryable,
+        "system_notice": system_notice,
     }
 
 
@@ -872,6 +1156,7 @@ def collect():
     the ancestor walk of whichever process recycles it later.
     """
     _status_cache.clear()
+    _retired_cache.clear()
     # last timestamps move with every append, so this cache is strictly
     # per-run (first timestamps are immutable per file and may persist)
     _last_ts_cache.clear()
@@ -975,7 +1260,12 @@ def collect():
             "transcript_live": False,
             "usage_limited": False,
             "resume_at": None,
+            "user_kind": "",
+            "api_error": False,
+            "api_error_retryable": False,
+            "system_notice": "",
             "subagent_idle_sec": None,
+            "cpu_ticks_per_sec": None,
             "usage": None,
         }
         transcript = info["transcript"]
@@ -993,6 +1283,10 @@ def collect():
                 info["turn_complete"] = bool(le.get("turn_complete"))
                 info["thinking"] = bool(le.get("thinking"))
                 info["usage_limited"] = bool(le.get("usage_limited"))
+                info["user_kind"] = le.get("user_kind") or ""
+                info["api_error"] = bool(le.get("api_error"))
+                info["api_error_retryable"] = bool(le.get("api_error_retryable"))
+                info["system_notice"] = le.get("system_notice") or ""
                 resume_at = le.get("resume_at")
                 info["resume_at"] = int(resume_at) if resume_at is not None else None
                 ts = parse_ts(le["timestamp"])
@@ -1018,7 +1312,13 @@ def collect():
                     transcript, time_now.timestamp())
             except Exception:
                 pass  # freshness must never cost a poll either
+        info["cpu_ticks_per_sec"] = cpu_rate(p["pid"])
         sessions.append(info)
+    # drop samples for processes that are gone, so a recycled pid is not
+    # compared against the previous owner's counter
+    live = {s["pid"] for s in sessions}
+    for gone in [pid for pid in _cpu_prev if pid not in live]:
+        _cpu_prev.pop(gone, None)
     sessions.sort(key=lambda s: s["pid"])
     # every live tmux session name (not only claude ones): task launches
     # reconcile their liveness against this list each poll
@@ -1046,6 +1346,8 @@ def serve():
     status on the Rust side, which then falls back to a one-shot run (and
     its real error message) instead of silently treating the poll as empty.
     """
+    global _SERVE
+    _SERVE = True
     for line in sys.stdin:
         cmd = line.strip()
         if cmd == "quit":

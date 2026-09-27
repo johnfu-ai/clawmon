@@ -119,7 +119,11 @@ fn detects_blocked_session_and_auto_continues() {
         .iter()
         .find(|v| v.cwd == fx.cwd.to_str().unwrap())
         .expect("fixture session not detected");
-    assert_eq!(v.state, SessionState::Red, "stale user entry must be red");
+    assert_eq!(
+        v.state,
+        SessionState::Green,
+        "a timeout inside tmux counts down in green"
+    );
     assert_eq!(v.reason, Reason::ResponseTimedOut);
     assert!(v.controllable, "tmux session should be controllable");
     assert!(v.countdown.is_some());
@@ -162,7 +166,8 @@ fn detects_blocked_session_and_auto_continues() {
 }
 
 /// Two claude processes in the same directory must map to two distinct
-/// transcript files (per-session mapping), and only the stale one goes red.
+/// transcript files, and only the stale one is a timeout (green countdown,
+/// because it is inside tmux).
 #[test]
 #[ignore = "requires live WSL/Linux + tmux"]
 fn concurrent_sessions_get_distinct_transcripts() {
@@ -263,20 +268,19 @@ fn concurrent_sessions_get_distinct_transcripts() {
         "sessions must not share a transcript: {ids:?}"
     );
 
-    // exactly the stale one is red
-    let red: Vec<_> = views
+    // the stale one is a timeout. It is in tmux with auto-continue on, so the
+    // countdown is green — red is only when nothing can press Enter.
+    let stalled: Vec<_> = views
         .iter()
-        .filter(|v| v.state == SessionState::Red)
+        .filter(|v| v.reason == Reason::ResponseTimedOut)
         .collect();
-    assert_eq!(red.len(), 1, "exactly one session must be red");
-    assert_eq!(red[0].session_id, "sess-a");
-    assert_eq!(red[0].reason, Reason::ResponseTimedOut);
+    assert_eq!(stalled.len(), 1, "exactly one session is timed out");
+    assert_eq!(stalled[0].session_id, "sess-a");
+    assert_eq!(stalled[0].state, SessionState::Green);
+    assert!(stalled[0].countdown.is_some());
 
-    let green: Vec<_> = views
-        .iter()
-        .filter(|v| v.state != SessionState::Red)
-        .collect();
-    assert_eq!(green[0].session_id, "sess-b");
+    let other = views.iter().find(|v| v.session_id == "sess-b").unwrap();
+    assert_ne!(other.reason, Reason::ResponseTimedOut);
 
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", tmux])

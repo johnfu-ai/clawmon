@@ -87,14 +87,14 @@ fn event_text(lang: &str, kind: EventKind, project: &str) -> (&'static str, Stri
     match kind {
         EventKind::TurnedRed => (
             if en {
-                "Session stuck"
+                "Session needs you"
             } else {
-                "会话疑似卡死"
+                "会话需要你处理"
             },
             if en {
-                format!("🔴 {project} looks blocked — will auto-continue as configured")
+                format!("🔴 {project} needs you — auto-continue cannot fix it")
             } else {
-                format!("🔴 {project} 疑似 API 超时，将按设置自动继续")
+                format!("🔴 {project} 需要你处理，自动继续无法解决")
             },
         ),
         EventKind::Recovered => (
@@ -115,6 +115,18 @@ fn event_text(lang: &str, kind: EventKind, project: &str) -> (&'static str, Stri
                 format!("✅ {project} finished its turn and waits for your input")
             } else {
                 format!("✅ {project} 本轮任务完成，等待输入")
+            },
+        ),
+        EventKind::NeedsInput => (
+            if en {
+                "Input needed"
+            } else {
+                "需要你输入"
+            },
+            if en {
+                format!("🟡 {project} is waiting for your input")
+            } else {
+                format!("🟡 {project} 正在等你输入")
             },
         ),
         EventKind::Exited => (
@@ -155,6 +167,7 @@ fn dispatch_event(app: &tauri::AppHandle, settings: &Settings, ev: SessionEvent)
         EventKind::TurnedRed => settings.notify_red,
         EventKind::Recovered => settings.notify_recovered,
         EventKind::TurnEnd => settings.notify_turn_end,
+        EventKind::NeedsInput => settings.notify_input,
         EventKind::Exited => settings.notify_exit,
     };
     if !enabled {
