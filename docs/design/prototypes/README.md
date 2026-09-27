@@ -1,4 +1,4 @@
-# clawmon UI 原型（v2 设计阶段产物）
+# cc-monitor UI 原型（v2 设计阶段产物）
 
 三套风格（Slate / Paper / CRT）× 四个页面（会话 / 任务 / 用量 / 设置）的
 静态原型。直接用浏览器打开 `index.html` 开始评选。

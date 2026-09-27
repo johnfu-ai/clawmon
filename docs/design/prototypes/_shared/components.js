@@ -1,4 +1,4 @@
-/* clawmon prototype — component factory.
+/* cc-monitor prototype — component factory.
  * Data in, DOM out. All four pages × three skins reuse these builders,
  * so a session card cannot drift between pages or themes (Factory pattern).
  * Class contract is owned by base.css (structure) + theme-*.css (skin). */

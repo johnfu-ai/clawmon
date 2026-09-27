@@ -134,7 +134,7 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public class ClawmonCon {
+public class CcMonitorCon {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   public struct RECT { public int L,T,R,B; }
@@ -143,10 +143,10 @@ public class ClawmonCon {
 Get-Process wsl -ErrorAction SilentlyContinue | ForEach-Object {
   $h = $_.MainWindowHandle
   if ($h -eq [IntPtr]::Zero) { return }
-  $r = New-Object ClawmonCon+RECT
-  [void][ClawmonCon]::GetWindowRect($h, [ref]$r)
+  $r = New-Object CcMonitorCon+RECT
+  [void][CcMonitorCon]::GetWindowRect($h, [ref]$r)
   $c = New-Object Text.StringBuilder 64
-  [void][ClawmonCon]::GetClassName($h, $c, 64)
+  [void][CcMonitorCon]::GetClassName($h, $c, 64)
   if ($c.ToString() -eq 'PseudoConsoleWindow' -and ($r.R - $r.L) -eq 0 -and ($r.B - $r.T) -eq 0) {
     ([DateTimeOffset]$_.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
   }

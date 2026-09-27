@@ -1,4 +1,4 @@
-/* clawmon prototype — unified page skeleton (Template Method pattern).
+/* cc-monitor prototype — unified page skeleton (Template Method pattern).
  *
  * A page provides ONLY:  <body class="t-<theme>" data-page="sessions|tasks|usage|settings"
  *                        data-banner="optional warning text">  +  <main class="page">…</main>
@@ -39,7 +39,7 @@
      }).join('');
     document.body.prepend(el(
       '<header class="topbar">' +
-        '<div class="brand"><span class="gem">◆</span><span>clawmon</span></div>' +
+        '<div class="brand"><span class="gem">◆</span><span>cc-monitor</span></div>' +
         '<div class="summary">' + chips + '</div>' +
       '</header>'
     ));

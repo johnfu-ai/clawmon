@@ -1,4 +1,4 @@
-/* clawmon prototype — mock data (Module pattern).
+/* cc-monitor prototype — mock data (Module pattern).
  * One sample set shared by every page and every skin, so style comparison
  * compares styles, not data. Numbers deliberately mirror screen-plans.md. */
 (function () {
@@ -35,11 +35,11 @@
         loc: 'docs:0.1 · pid 6230'
       },
       {
-        state: 'green', project: 'clawmon', task: true,
+        state: 'green', project: 'cc-monitor', task: true,
         reason: '工具运行中 · Bash',
         idle: '8s',
         usage: { in: '980K', cache: '1.0M', out: '61K', req: 31 },
-        preview: '$ cargo test -p clawmon-core --test integration -- --ignored',
+        preview: '$ cargo test -p cc-monitor-core --test integration -- --ignored',
         loc: 'claw:0.0 · pid 3011'
       },
       {
@@ -64,7 +64,7 @@
         sessState: 'red', sessText: '429 等待重置 · 倒计时中'
       },
       {
-        title: '重构解析器', cwd: '~/clawmon', cmd: 'claude "重构 detect.py 配对逻辑"',
+        title: '重构解析器', cwd: '~/cc-monitor', cmd: 'claude "重构 detect.py 配对逻辑"',
         status: 'running', info: '4m',
         sessState: 'green', sessText: '工具运行中 · Bash'
       },
@@ -87,7 +87,7 @@
       ],
       sessionUsage: [
         { name: 'webapp',    w: 100, out: '89K', req: 42 },
-        { name: 'clawmon',   w: 69,  out: '61K', req: 31 },
+        { name: 'cc-monitor',   w: 69,  out: '61K', req: 31 },
         { name: 'docs-site', w: 43,  out: '38K', req: 12 },
         { name: 'parser',    w: 10,  out: '9K',  req: 4 }
       ]

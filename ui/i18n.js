@@ -1,4 +1,4 @@
-/* clawmon i18n — every entry is [zh, en]; zh is the default UI language.
+/* cc-monitor i18n — every entry is [zh, en]; zh is the default UI language.
    Static HTML keeps its Chinese text inline and carries data-i18n keys;
    applyI18n() swaps the strings whenever the language changes. */
 let LANG = "zh";

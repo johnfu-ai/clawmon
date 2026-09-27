@@ -1,5 +1,5 @@
 [package]
-name = "clawmon-core"
+name = "cc-monitor-core"
 version.workspace = true
 edition.workspace = true
 

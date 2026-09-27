@@ -235,7 +235,7 @@ fn needs_input(reason: Reason) -> bool {
     )
 }
 
-/// Light from the reason plus whether clawmon can still fix a stall.
+/// Light from the reason plus whether cc-monitor can still fix a stall.
 ///
 /// Green is "no user action needed", and that includes a stall whose
 /// auto-continue countdown is still running. Red is only "a person has to
@@ -455,7 +455,7 @@ impl Engine {
             let had_episode = t.blocked_since.is_some();
 
             // The episode is the stall, not the red light: a countdown that
-            // clawmon is still handling stays green, and the bookkeeping
+            // cc-monitor is still handling stays green, and the bookkeeping
             // (when it started, how many Enters) has to survive that.
             if stall {
                 if t.blocked_since.is_none() {
@@ -845,7 +845,7 @@ mod tests {
 
     /// Waiting on the API needs no user action, however long it takes — green
     /// while merely slow. Past the timeout it is still green when the session
-    /// is in tmux and auto-continue can fire: the countdown is clawmon's job,
+    /// is in tmux and auto-continue can fire: the countdown is cc-monitor's job,
     /// not the user's. The same timeout outside tmux is red.
     #[test]
     fn timeout_is_green_while_auto_continue_can_fire_and_red_otherwise() {
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(v[0].blocked_since, Some(1300));
         assert!(
             evs.iter().all(|e| e.kind != EventKind::TurnedRed),
-            "a countdown clawmon is handling is not a red episode: {evs:?}"
+            "a countdown cc-monitor is handling is not a red episode: {evs:?}"
         );
 
         let mut bare = session(2, "user", 540);
@@ -1107,7 +1107,7 @@ mod tests {
     /// writes the `turn_duration` trailer right after the assistant's
     /// "agents are running" status text while it holds the turn open for
     /// background agents — 12 of them kept writing their own transcripts
-    /// for minutes while clawmon showed blue "回合完成" with the turn
+    /// for minutes while cc-monitor showed blue "回合完成" with the turn
     /// "complete". The agents run in-process, so the only visible progress
     /// is fresh writes under <stem>/subagents/: while those are fresh the
     /// session is parked on subagents, not on the user.
@@ -1306,7 +1306,7 @@ mod tests {
 
     /// The 5-hour usage-limit 429 is a synthetic assistant record with a
     /// turn trailer — the same shape as a finished turn. It is not done.
-    /// Inside tmux the countdown is green (clawmon will press Enter at the
+    /// Inside tmux the countdown is green (cc-monitor will press Enter at the
     /// reset); that is not a "needs a person" notification.
     #[test]
     fn usage_limit_countdown_is_green_until_the_reset() {

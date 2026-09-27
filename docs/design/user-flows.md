@@ -1,4 +1,4 @@
-# clawmon 用户流程与页面导航（v2 设计）
+# cc-monitor 用户流程与页面导航（v2 设计）
 
 | 项目 | 内容 |
 |------|------|
@@ -76,7 +76,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     L[点击 启动] --> LOCK[引擎锁内登记 launching<br/>重叠点击被吸收]
-    LOCK --> TMUX[tmux new-session -d -s clawmon-task-id -c cwd command]
+    LOCK --> TMUX[tmux new-session -d -s cc-monitor-task-id -c cwd command]
     TMUX -->|失败| ERR[任务 已结束 + 错误 toast]
     TMUX -->|成功| NEXT[下一轮轮询 ≤5s]
     NEXT --> CONFIRM[检测到任务 tmux 会话 → running]
@@ -97,7 +97,7 @@ flowchart LR
     E -->|关闭窗格| F[detach · 会话继续在 tmux 里跑]
 ```
 
-要点：终端进程与 clawmon 解耦（无 CREATE_NO_WINDOW、独立进程）；
+要点：终端进程与 cc-monitor 解耦（无 CREATE_NO_WINDOW、独立进程）；
 关闭终端 = detach，任务不中断；监控**不依赖**此按钮。
 
 ## 6. F5 查看用量

@@ -1,4 +1,4 @@
-//! clawmon-core: platform-independent monitoring logic for Claude Code
+//! cc-monitor-core: platform-independent monitoring logic for Claude Code
 //! sessions running inside WSL.
 //!
 //! Everything except the actual process spawning (`wsl`) is pure logic with

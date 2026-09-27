@@ -1,4 +1,4 @@
-/* clawmon prototype — structural skeleton (NO colors, NO theme).
+/* cc-monitor prototype — structural skeleton (NO colors, NO theme).
    All visuals come from theme-*.css tokens. Customization points:
    --font-ui/--font-mono, --radius*, --bar-track/--bar-fill, colors. */
 

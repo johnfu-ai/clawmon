@@ -1,8 +1,8 @@
 //! End-to-end test for the full monitoring loop. Requires a live WSL/Linux
-//! environment with tmux — run with `cargo test -p clawmon-core --test
+//! environment with tmux — run with `cargo test -p cc-monitor-core --test
 //! integration -- --ignored`.
 
-use clawmon_core::{
+use cc_monitor_core::{
     detect,
     engine::Reason,
     tasks::{Task, TaskStatus, TaskStore},
@@ -34,9 +34,9 @@ struct Fixture {
 impl Fixture {
     fn setup() -> Self {
         let home = PathBuf::from(std::env::var("HOME").unwrap());
-        let cwd = std::env::temp_dir().join("clawmon-it");
+        let cwd = std::env::temp_dir().join("cc-monitor-it");
         std::fs::create_dir_all(&cwd).unwrap();
-        // transcript dir derived from cwd (/tmp/clawmon-it → -tmp-clawmon-it)
+        // transcript dir derived from cwd (/tmp/cc-monitor-it → -tmp-cc-monitor-it)
         let slug = {
             let s = cwd.to_str().unwrap();
             let mut out = String::new();
@@ -53,14 +53,14 @@ impl Fixture {
         std::fs::write(
             &transcript,
             concat!(
-                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","sessionId":"itest","cwd":"/tmp/clawmon-it","message":{"id":"msg_it_1","role":"assistant","content":[{"type":"text","text":"前一轮回复"}],"usage":{"input_tokens":100,"cache_read_input_tokens":10,"cache_creation_input_tokens":5,"output_tokens":50}}}"#, "\n",
-                r#"{"type":"user","timestamp":"2026-01-01T00:10:00Z","sessionId":"itest","cwd":"/tmp/clawmon-it","message":{"role":"user","content":"继续干活"}}"#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","sessionId":"itest","cwd":"/tmp/cc-monitor-it","message":{"id":"msg_it_1","role":"assistant","content":[{"type":"text","text":"前一轮回复"}],"usage":{"input_tokens":100,"cache_read_input_tokens":10,"cache_creation_input_tokens":5,"output_tokens":50}}}"#, "\n",
+                r#"{"type":"user","timestamp":"2026-01-01T00:10:00Z","sessionId":"itest","cwd":"/tmp/cc-monitor-it","message":{"role":"user","content":"继续干活"}}"#, "\n",
             ),
         )
         .unwrap();
 
         // a fake "claude" process inside tmux, cwd = our fixture dir
-        let tmux = "clawmonit".to_string();
+        let tmux = "cc-monitor-it".to_string();
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &tmux])
             .status();
@@ -94,7 +94,7 @@ impl Drop for Fixture {
     }
 }
 
-fn run(settings: &Settings) -> (Vec<SessionView>, Vec<i32>, clawmon_core::RawStatus) {
+fn run(settings: &Settings) -> (Vec<SessionView>, Vec<i32>, cc_monitor_core::RawStatus) {
     let snap = detect(settings).expect("detect");
     let mut e = Engine::new();
     let (views, due, _) = e.update(snap.clone(), settings);
@@ -110,7 +110,7 @@ fn detects_blocked_session_and_auto_continues() {
         wait_secs: 0, // fire immediately for the test
         blocked_after_secs: 60,
         idle_green_secs: 10,
-        resume_keys: "CLAWMON-FIRED".to_string(),
+        resume_keys: "CCMONITOR-FIRED".to_string(),
         ..Default::default()
     };
 
@@ -160,7 +160,7 @@ fn detects_blocked_session_and_auto_continues() {
         .unwrap();
     let text = String::from_utf8_lossy(&cap.stdout);
     assert!(
-        text.contains("CLAWMON-FIRED"),
+        text.contains("CCMONITOR-FIRED"),
         "keys did not reach the pane: {text}"
     );
 }
@@ -172,8 +172,8 @@ fn detects_blocked_session_and_auto_continues() {
 #[ignore = "requires live WSL/Linux + tmux"]
 fn concurrent_sessions_get_distinct_transcripts() {
     let home = PathBuf::from(std::env::var("HOME").unwrap());
-    let cwd = std::env::temp_dir().join("clawmon-it2");
-    let slug = "-tmp-clawmon-it2";
+    let cwd = std::env::temp_dir().join("cc-monitor-it2");
+    let slug = "-tmp-cc-monitor-it2";
     let proj = home.join(".claude").join("projects").join(slug);
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir_all(&proj).unwrap();
@@ -182,7 +182,7 @@ fn concurrent_sessions_get_distinct_transcripts() {
         let _ = std::fs::remove_file(f.path());
     }
 
-    let tmux = "clawmonit2";
+    let tmux = "cc-monitor-it2";
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", tmux])
         .status();
@@ -193,8 +193,8 @@ fn concurrent_sessions_get_distinct_transcripts() {
         proj.join("00000000-0000-0000-0000-00000000000b.jsonl"),
         format!(
             concat!(
-                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-b","cwd":"/tmp/clawmon-it2","message":{{"role":"user","content":"hi"}}}}"#, "\n",
-                r#"{{"type":"assistant","timestamp":"{}","sessionId":"sess-b","cwd":"/tmp/clawmon-it2","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#, "\n",
+                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-b","cwd":"/tmp/cc-monitor-it2","message":{{"role":"user","content":"hi"}}}}"#, "\n",
+                r#"{{"type":"assistant","timestamp":"{}","sessionId":"sess-b","cwd":"/tmp/cc-monitor-it2","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#, "\n",
             ),
             t0, t0,
         ),
@@ -220,8 +220,8 @@ fn concurrent_sessions_get_distinct_transcripts() {
         proj.join("00000000-0000-0000-0000-00000000000a.jsonl"),
         format!(
             concat!(
-                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-a","cwd":"/tmp/clawmon-it2","message":{{"role":"user","content":"start"}}}}"#, "\n",
-                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-a","cwd":"/tmp/clawmon-it2","message":{{"role":"user","content":"continue"}}}}"#, "\n",
+                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-a","cwd":"/tmp/cc-monitor-it2","message":{{"role":"user","content":"start"}}}}"#, "\n",
+                r#"{{"type":"user","timestamp":"{}","sessionId":"sess-a","cwd":"/tmp/cc-monitor-it2","message":{{"role":"user","content":"continue"}}}}"#, "\n",
             ),
             t1, old,
         ),
@@ -247,7 +247,7 @@ fn concurrent_sessions_get_distinct_transcripts() {
     let ours: Vec<_> = snap
         .sessions
         .iter()
-        .filter(|s| s.cwd == "/tmp/clawmon-it2")
+        .filter(|s| s.cwd == "/tmp/cc-monitor-it2")
         .collect();
     assert_eq!(ours.len(), 2, "both fake claude processes must be found");
 
@@ -255,7 +255,7 @@ fn concurrent_sessions_get_distinct_transcripts() {
     let (views, _, _) = e.update(snap, &st);
     let views: Vec<_> = views
         .into_iter()
-        .filter(|v| v.cwd == "/tmp/clawmon-it2")
+        .filter(|v| v.cwd == "/tmp/cc-monitor-it2")
         .collect();
     assert_eq!(views.len(), 2);
 

@@ -167,7 +167,7 @@ pub fn tmux_kill_session(distro: &str, name: &str) -> Result<(), String> {
 
 /// Open a visible terminal attached to a tmux session (FR10.4): Windows
 /// Terminal when available, else a windowed wsl.exe console. The terminal
-/// is its own process — clawmon exiting must never close it — so this only
+/// is its own process — cc-monitor exiting must never close it — so this only
 /// spawns and never waits, and it must NOT use CREATE_NO_WINDOW.
 pub fn open_terminal(distro: &str, session: &str) -> Result<(), String> {
     #[cfg(windows)]
@@ -361,7 +361,7 @@ mod tests {
     /// pid so we can check afterwards that it is really gone.
     #[test]
     fn timeout_kills_the_child() {
-        let pidfile = std::env::temp_dir().join("clawmon-wsl-timeout.pid");
+        let pidfile = std::env::temp_dir().join("cc-monitor-wsl-timeout.pid");
         let _ = std::fs::remove_file(&pidfile);
         let script = format!("echo $$ > {} ; exec sleep 60", pidfile.display());
         let start = Instant::now();
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     #[cfg(all(test, target_os = "linux"))]
     fn task_session_lifecycle() {
-        let name = "clawmon-wsl-test-task";
+        let name = "cc-monitor-wsl-test-task";
         let _ = run(&["tmux", "kill-session", "-t", name], 5);
         tmux_new_session("", name, "/tmp", "sleep 60").expect("new-session");
         let list = run(&["tmux", "list-sessions", "-F", "#{session_name}"], 5).unwrap();

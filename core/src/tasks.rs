@@ -39,7 +39,7 @@ impl Task {
     /// The tmux session a launch of this task owns. App-generated, so it can
     /// never look like a tmux option or collide with a user's own session.
     pub fn session_name(&self) -> String {
-        format!("clawmon-task-{}", self.id)
+        format!("cc-monitor-task-{}", self.id)
     }
 
     /// Reject rather than repair: `add`/`update` are user actions with an
@@ -108,7 +108,7 @@ pub struct TaskView {
     pub cwd: String,
     pub command: String,
     pub status: TaskStatus,
-    /// `clawmon-task-<id>` — what to attach a terminal to
+    /// `cc-monitor-task-<id>` — what to attach a terminal to
     pub session_name: String,
     /// the claude session running inside the task's tmux session, when any
     pub session_id: Option<String>,
@@ -449,7 +449,7 @@ mod tests {
             .add(task("报告", "/tmp/docs", "make report"), 101)
             .unwrap();
         assert_eq!((a.id, b.id), (1, 2), "ids are sequential and app-owned");
-        assert_eq!(a.session_name(), "clawmon-task-1");
+        assert_eq!(a.session_name(), "cc-monitor-task-1");
 
         assert!(s.add(task("", "/a", "x"), 102).is_err(), "empty title");
         assert!(
@@ -506,7 +506,7 @@ mod tests {
         let mut s = store();
         s.add(task("t", "/a", "x"), 0).unwrap();
         let spec = s.claim_launch(1, 100).unwrap();
-        assert_eq!(spec.session_name(), "clawmon-task-1");
+        assert_eq!(spec.session_name(), "cc-monitor-task-1");
         assert_eq!(s.status_of(1), TaskStatus::Launching);
         assert_eq!(
             s.claim_launch(1, 101).unwrap_err(),
@@ -521,7 +521,7 @@ mod tests {
         let mut s = store();
         s.add(task("t", "/a", "x"), 0).unwrap();
         s.claim_launch(1, 100).unwrap();
-        s.reconcile(&["clawmon-task-1".to_string()], 105);
+        s.reconcile(&["cc-monitor-task-1".to_string()], 105);
         assert_eq!(s.status_of(1), TaskStatus::Running);
         assert_eq!(s.claim_launch(1, 106).unwrap_err(), "任务已在运行");
         // relaunch after it ends is fine
@@ -541,9 +541,9 @@ mod tests {
         assert_eq!(s.status_of(1), TaskStatus::Launching);
 
         // session appears (with a claude session inside) → running + linked
-        s.reconcile(&["clawmon-task-1".into()], 1020);
+        s.reconcile(&["cc-monitor-task-1".into()], 1020);
         assert_eq!(s.status_of(1), TaskStatus::Running);
-        let v = &s.views(&[claude_in("clawmon-task-1", "sess-42", 777)])[0];
+        let v = &s.views(&[claude_in("cc-monitor-task-1", "sess-42", 777)])[0];
         assert_eq!(v.session_id.as_deref(), Some("sess-42"));
         assert_eq!(v.pid, Some(777));
 
@@ -569,7 +569,7 @@ mod tests {
     fn restart_adopts_a_live_session() {
         let mut s = store();
         s.add(task("t", "/a", "x"), 0).unwrap();
-        s.reconcile(&["clawmon-task-1".into()], 500);
+        s.reconcile(&["cc-monitor-task-1".into()], 500);
         assert_eq!(s.status_of(1), TaskStatus::Running);
     }
 
@@ -579,7 +579,7 @@ mod tests {
         s.add(task("t", "/a", "x"), 0).unwrap();
         assert!(s.claim_stop(1, 100).is_err(), "idle task cannot stop");
         s.claim_launch(1, 100).unwrap();
-        s.reconcile(&["clawmon-task-1".into()], 105);
+        s.reconcile(&["cc-monitor-task-1".into()], 105);
         s.claim_stop(1, 110).unwrap();
         assert_eq!(s.status_of(1), TaskStatus::Finished);
         assert!(s.claim_stop(1, 111).is_err(), "double stop refused");
@@ -592,11 +592,11 @@ mod tests {
         s.add(task("run", "/b", "y"), 0).unwrap();
         s.add(task("done", "/c", "z"), 0).unwrap();
         s.claim_launch(2, 100).unwrap();
-        s.reconcile(&["clawmon-task-2".into()], 105); // task 2 → running
+        s.reconcile(&["cc-monitor-task-2".into()], 105); // task 2 → running
         s.claim_launch(3, 70).unwrap();
         // one monotonic clock: task 2 stays alive, task 3's never-seen
         // launch is past the grace window → finished
-        s.reconcile(&["clawmon-task-2".into()], 200);
+        s.reconcile(&["cc-monitor-task-2".into()], 200);
         let order: Vec<u64> = s.views(&[]).iter().map(|v| v.id).collect();
         assert_eq!(order, [2, 1, 3], "running → idle → finished");
     }
@@ -609,8 +609,8 @@ mod tests {
         let mut s = store();
         s.add(task("修复", "~/w", "claude \"go\""), 10).unwrap();
         s.claim_launch(1, 20).unwrap();
-        s.reconcile(&["clawmon-task-1".into()], 25);
-        let v = &s.views(&[claude_in("clawmon-task-1", "abc", 9)])[0];
+        s.reconcile(&["cc-monitor-task-1".into()], 25);
+        let v = &s.views(&[claude_in("cc-monitor-task-1", "abc", 9)])[0];
         let obj = serde_json::to_value(v).unwrap();
         let mut keys: Vec<&str> = obj
             .as_object()
@@ -624,7 +624,7 @@ mod tests {
             "command,createdAt,cwd,id,lastRunAt,pid,sessionId,sessionName,status,title"
         );
         assert_eq!(obj["status"], "running");
-        assert_eq!(obj["sessionName"], "clawmon-task-1");
+        assert_eq!(obj["sessionName"], "cc-monitor-task-1");
         assert_eq!(obj["sessionId"], "abc");
         assert_eq!(obj["pid"], 9);
     }

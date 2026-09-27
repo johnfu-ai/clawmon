@@ -1,4 +1,4 @@
-/* clawmon frontend — plain JS on the Tauri global API (no bundler needed) */
+/* cc-monitor frontend — plain JS on the Tauri global API (no bundler needed) */
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -134,8 +134,8 @@ function render(sessions, warning) {
     const state = LIGHTS.includes(s.state) ? s.state : "yellow";
     const light = `<span class="light ${state}"></span>`;
     // display-only derivation: a task-launched session lives in a tmux
-    // session named clawmon-task-* (the label is "session:window")
-    const fromTask = (s.tmuxLabel || "").startsWith("clawmon-task-");
+    // session named cc-monitor-task-* (the label is "session:window")
+    const fromTask = (s.tmuxLabel || "").startsWith("cc-monitor-task-");
     const taskBadge = fromTask
       ? `<span class="task-badge" title="${escapeHtml(t("tasks.linked"))}">▶ ${escapeHtml(t("tasks.title"))}</span>`
       : "";

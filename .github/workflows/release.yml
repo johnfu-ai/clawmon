@@ -28,6 +28,6 @@ jobs:
         with:
           # cargo workspace → target dir sits at the repo root
           files: |
-            target/release/clawmon.exe
+            target/release/cc-monitor.exe
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe

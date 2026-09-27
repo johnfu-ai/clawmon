@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>clawmon · 任务 — Crt</title>
+<title>cc-monitor · 任务 — Crt</title>
 <link rel="stylesheet" href="../_shared/base.css">
 <link rel="stylesheet" href="../_shared/theme-crt.css">
 <script src="../_shared/mock-data.js" defer></script>
@@ -77,7 +77,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     if (text === '启动' || text === '再次启动') {
       t.status = 'launching'; t.info = ''; render();                       // booked before round trip (FR10.2)
-      UI.toast('启动中：tmux new-session -d -s clawmon-task-' + (++seq) + ' …');
+      UI.toast('启动中：tmux new-session -d -s cc-monitor-task-' + (++seq) + ' …');
       setTimeout(function () {
         t.status = 'running'; t.info = '刚刚';                              // confirmed by next poll
         t.sessState = 'green'; t.sessText = '会话已出现 · 等待首轮检测';
@@ -90,7 +90,7 @@ document.addEventListener('DOMContentLoaded', function () {
     } else if (text === '删除') {
       Mock.tasks.splice(i, 1); render();
     } else if (text === '打开终端') {
-      UI.toast('原型演示：wt.exe → wsl.exe -- tmux attach -t clawmon-task-' + seq);
+      UI.toast('原型演示：wt.exe → wsl.exe -- tmux attach -t cc-monitor-task-' + seq);
     } else if (text === '编辑') {
       UI.toast('原型演示：编辑任务');
     }

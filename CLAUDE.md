@@ -1,4 +1,4 @@
-# clawmon — project notes for Claude Code
+# cc-monitor — project notes for Claude Code
 
 Claude Code WSL session monitor: a Tauri 2 Windows app that watches claude
 processes inside WSL and auto-continues stuck sessions via `tmux send-keys`.
@@ -18,20 +18,20 @@ cross-compilation from Linux — drive the Windows-native toolchain instead:
 #    Plain `cargo check --target x86_64-pc-windows-msvc` is NOT enough —
 #    it does not run clippy lints, and a lint has failed CI before.
 cargo fmt --all --check
-cargo clippy -p clawmon-core --all-targets -- -D warnings
-cargo test -p clawmon-core
-cargo test -p clawmon-core --test integration -- --ignored --test-threads=1
+cargo clippy -p cc-monitor-core --all-targets -- -D warnings
+cargo test -p cc-monitor-core
+cargo test -p cc-monitor-core --test integration -- --ignored --test-threads=1
 scripts/win-clippy.sh   # or: RC=.tools/bin/llvm-rc CC_x86_64_pc_windows_msvc=gcc \
-                        #      cargo clippy --target x86_64-pc-windows-msvc -p clawmon --all-targets -- -D warnings
+                        #      cargo clippy --target x86_64-pc-windows-msvc -p cc-monitor --all-targets -- -D warnings
 
 # 2. Windows-native exe build (proven path, ~4 min incremental).
 scripts/build-local.sh
 ```
 
-`scripts/build-local.sh` mirrors the repo into `C:\Users\<user>\clawmon-build`
+`scripts/build-local.sh` mirrors the repo into `C:\Users\<user>\cc-monitor-build`
 (excluding `.git/`, `target/`, `ai-log.md` — the target dir is kept as the
 incremental cache) and invokes the Windows-side `cargo.exe build --release`
-through interop. Artifact: `C:\Users\<user>\clawmon-build\target\release\clawmon.exe`.
+through interop. Artifact: `C:\Users\<user>\cc-monitor-build\target\release\cc-monitor.exe`.
 
 ## Releases
 

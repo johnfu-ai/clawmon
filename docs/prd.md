@@ -1,8 +1,8 @@
-# clawmon 产品需求文档（PRD）
+# cc-monitor 产品需求文档（PRD）
 
 | 项目 | 内容 |
 |------|------|
-| 产品名称 | clawmon — Claude Code WSL 状态监控 |
+| 产品名称 | cc-monitor — Claude Code WSL 状态监控 |
 | 文档版本 | 2.0（v2 新增：任务管理 FR10、多页面主窗口 FR5.2、用量页；v1 内容对应产品 v0.2.0 + main 2026-09-25） |
 | 文档状态 | v2 已实现（FR10 / FR5.2 / 用量页随 feat/tasks-ui-design 分支落地，视觉采用 B「Paper」设计系统，未发版；其余描述已实现产品） |
 | 更新日期 | 2026-09-25 |
@@ -27,7 +27,7 @@
 
 ### 1.2 产品定义
 
-clawmon 是一个 **Windows 桌面常驻小程序**（Tauri 2），它：
+cc-monitor 是一个 **Windows 桌面常驻小程序**（Tauri 2），它：
 
 - 监控 WSL 内所有 Claude Code 会话进程；
 - 用 **红 / 黄 / 蓝 / 绿灯** 表达每个会话「是否需要用户采取行动」；
@@ -237,7 +237,7 @@ claude              # 在 tmux 里启动 claude
 
 - **无转录或转录不新鲜 → 永远不红、永不自动发键**。无转录且进程空闲是蓝灯
   「待命」，不是黄灯。
-- **绿灯只覆盖「可证明不需要用户」的等待**，包括 clawmon 自己的倒计时。
+- **绿灯只覆盖「可证明不需要用户」的等待**，包括 cc-monitor 自己的倒计时。
   30 秒空闲启发式不足以证明「已完成」。
 - **进程空闲（常驻模式测得 < 5 ticks/s）永不发 Enter**。一次性模式没有样本，
   退回只看转录。实测（Claude Code 2.1.280，2026-09-27，CLK_TCK 100）：提示符
@@ -254,7 +254,7 @@ claude              # 在 tmux 里启动 claude
 
 **定义**：会话进入停顿（超时、用量 429、可重试 API 错误）并满足条件后，向其
 tmux pane 发送配置的按键序列，使 claude 恢复执行。倒计时期间灯是**绿色**
-（clawmon 在处理，不需要用户）；只有自动继续接不了的时候才变红。
+（cc-monitor 在处理，不需要用户）；只有自动继续接不了的时候才变红。
 
 #### FR3.1 可控性前提
 
@@ -443,7 +443,7 @@ Windows 命名互斥体保证单实例（第二个实例启动即退出）；互
 
 #### FR10.2 启动执行
 
-- 以 `tmux new-session -d -s clawmon-task-<id> -c <cwd> <command>` 启动
+- 以 `tmux new-session -d -s cc-monitor-task-<id> -c <cwd> <command>` 启动
   （argv 传递，不经 Windows 侧 shell；`-c` 由 tmux 切工作目录；命令串由
   WSL 内登录 shell 解释——与用户亲手敲入等价，属同一信任边界）；
 - **同一任务同时只允许一个实例**：启动前查询同名 tmux 会话是否存活，
@@ -457,7 +457,7 @@ Windows 命名互斥体保证单实例（第二个实例启动即退出）；互
 |------|------|
 | 待启动 idle | 从未运行，或上次运行已结束 |
 | 启动中 launching | 已发出 new-session，等待下一轮检测确认 |
-| 运行中 running | 检测到名为 `clawmon-task-<id>` 的 tmux 会话存活（并在会话页关联到对应会话行） |
+| 运行中 running | 检测到名为 `cc-monitor-task-<id>` 的 tmux 会话存活（并在会话页关联到对应会话行） |
 | 已结束 finished | 该 tmux 会话消失（命令退出，含立即失败） |
 
 - 任务拉起的会话在**会话页与普通会话完全同权**：四色灯、自动继续、
@@ -470,7 +470,7 @@ Windows 命名互斥体保证单实例（第二个实例启动即退出）；互
   `wsl.exe -d <distro> -- tmux attach -t <name>`；无 WT 时回退窗口化的
   `wsl.exe`；
 - 该启动走**不带 CREATE_NO_WINDOW 的独立进程**，与监控进程解耦——
-  clawmon 退出不连带关闭用户终端；**监控不依赖此按钮**：分离会话本就
+  cc-monitor 退出不连带关闭用户终端；**监控不依赖此按钮**：分离会话本就
   被检测覆盖，按钮只为「想亲眼看看」服务；
 - attach 关闭窗格 = detach，不影响 tmux 内会话继续运行。
 
@@ -499,7 +499,7 @@ Windows 命名互斥体保证单实例（第二个实例启动即退出）；互
 
 - **常驻检测降级路径**：常驻进程死亡/超时/输出不可解析 → 该轮自动降级一次性
   管道，下轮重新上传脚本并拉起常驻进程（脚本每次重生都重新上传，路径
-  `/tmp/clawmon-detect.py` 可挥発）；
+  `/tmp/cc-monitor-detect.py` 可挥発）；
 - **命令超时治理**：所有 WSL 命令 25 秒超时，超时 kill **并 reap**（不留
   僵尸 wsl.exe 堆积）；stdout/stderr 各自独立线程排空（防 64KB 管道缓冲
   死锁）；UTF-8 损失字节不产生静默空结果；
@@ -518,7 +518,7 @@ Windows 命名互斥体保证单实例（第二个实例启动即退出）；互
 
 ### NFR4 可测试性
 
-- 全部监控逻辑位于平台无关的 `clawmon-core` crate（不依赖 Tauri），可在
+- 全部监控逻辑位于平台无关的 `cc-monitor-core` crate（不依赖 Tauri），可在
   Linux/CI 直接测试；
 - Rust↔JS 线格式（`SessionView` / `UsageInfo` 序列化键集）由**线契约测试**
   钉死，任何字段改名必须对照测试注释中点名的 JS 读取方交叉检查；
@@ -633,7 +633,7 @@ api_error_retryable, system_notice, subagent_idle_sec?, cpu_ticks_per_sec?`。
 7. 关闭 WT 标签后对应会话从列表消失（≤ 缓存 TTL）；tmux 会话保留；
 8. 令牌审计：全量输出（stdout/stderr/日志/通知/配置）中不出现令牌值；
 9. WSL 关停：列表保留 + 横幅告警，恢复后自动续上，无误报 exited；
-10. `cargo test -p clawmon-core`（单元 + 驱动测试）、`--ignored` 集成
+10. `cargo test -p cc-monitor-core`（单元 + 驱动测试）、`--ignored` 集成
     （tmux）、双平台 clippy `-D warnings`、`py_compile` 全绿；
 11. （v2）主导航四项在会话/任务/用量/设置四页完全一致（位置、次序、
     行为），仅高亮不同；
@@ -649,7 +649,7 @@ api_error_retryable, system_notice, subagent_idle_sec?, cpu_ticks_per_sec?`。
 | 流程 | 方式 |
 |------|------|
 | CI（每次 push/PR） | ubuntu：fmt + core clippy + 单元 + tmux 集成 + py_compile；windows：shell clippy `-D warnings` |
-| 本地 Windows exe | `scripts/build-local.sh`：WSL 镜像仓库到 `C:\Users\<user>\clawmon-build`（保留 target 缓存），Interop 调用 Windows 原生 `cargo.exe build --release`（禁止从 Linux 全量交叉编译） |
+| 本地 Windows exe | `scripts/build-local.sh`：WSL 镜像仓库到 `C:\Users\<user>\cc-monitor-build`（保留 target 缓存），Interop 调用 Windows 原生 `cargo.exe build --release`（禁止从 Linux 全量交叉编译） |
 | 发布 | 仅 tag 驱动：推 `v*` 标签 → GitHub Actions Windows runner 构建 exe + 安装器并挂到 Release。**本地构建永不参与发布** |
 | 预推送校验 | fmt / core clippy / core test / ignored 集成 / `win-clippy.sh`（注意：`cargo check` 不跑 lint，曾漏过 needless_borrow 导致 CI 失败） |
 

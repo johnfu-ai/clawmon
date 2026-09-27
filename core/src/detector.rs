@@ -11,7 +11,7 @@ pub const DETECT_SCRIPT: &str = include_str!("detect.py");
 
 /// Where the script lands inside the distro for the resident process.
 /// Uploaded again on every (re)spawn, so a volatile path is fine.
-const SERVE_SCRIPT_PATH: &str = "/tmp/clawmon-detect.py";
+const SERVE_SCRIPT_PATH: &str = "/tmp/cc-monitor-detect.py";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TmuxInfo {
@@ -320,7 +320,7 @@ mod tests {
 import importlib.util, json, os, sys
 
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -417,7 +417,7 @@ print(json.dumps(results))
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys
 detect_path, path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(path, "w") as f:
@@ -478,7 +478,7 @@ print(json.dumps(mod.last_entry(path)))
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys
 detect_path, path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(path, "w") as f:
@@ -528,7 +528,7 @@ print(json.dumps(mod.last_entry(path)))
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys
 detect_path, path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(path, "w") as f:
@@ -580,7 +580,7 @@ print(json.dumps(mod.last_entry(path)))
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys
 detect_path, path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 with open(path, "w") as f:
@@ -640,7 +640,7 @@ print(json.dumps(mod.last_entry(path)))
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys, time
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -710,7 +710,7 @@ print(json.dumps({
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys, time
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -778,7 +778,7 @@ print(json.dumps(mod.subagent_idle_sec(main, now)))
 import importlib.util, json, os, sys
 from datetime import datetime, timedelta, timezone
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -891,7 +891,7 @@ print(json.dumps({
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1054,7 +1054,7 @@ print(json.dumps(cases))
         const DRIVER: &str = r#"
 import importlib.util, json, os, sys
 detect_path, path = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 big = "x" * (80 * 1024)
@@ -1114,7 +1114,7 @@ print(json.dumps(mod.last_entry(path)))
         const DRIVER: &str = r#"
 import importlib.util, os, sys, time
 detect_path = sys.argv[1]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1248,7 +1248,7 @@ print(json.dumps({
 import importlib.util, json, os, sys, time
 
 detect_path, root = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1343,7 +1343,7 @@ print(json.dumps({str(k): os.path.basename(v) if v else None
 import importlib.util, json, os, sys
 
 detect_path, root = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1462,7 +1462,7 @@ print(json.dumps({str(k): os.path.basename(v) if v else None
 import importlib.util, json, os, sys
 
 detect_path, root = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1561,7 +1561,7 @@ print(json.dumps({
 import importlib.util, json, os, sys
 
 detect_path, root = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1651,7 +1651,7 @@ print(json.dumps({"picked": os.path.basename(picked) if picked else None}))
 import importlib.util, json, os, sys
 
 detect_path, root = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1754,7 +1754,7 @@ print(json.dumps({str(k): os.path.basename(v) if v else None
 import importlib.util, json, os, sys
 
 detect_path, root = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -1852,7 +1852,7 @@ print(json.dumps({str(k): v for k, v in mapping.items()}))
 import importlib.util, json, os, subprocess, sys, time
 
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -2011,7 +2011,7 @@ print(json.dumps({
 import importlib.util, json, os, subprocess, sys, time
 
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
@@ -2120,7 +2120,7 @@ print(json.dumps({
     fn orphaned_console_match_uses_start_slop() {
         const DRIVER: &str = r#"
 import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("clawmon_detect", sys.argv[1])
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", sys.argv[1])
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 print(json.dumps({
@@ -2167,7 +2167,7 @@ print(json.dumps({
 import importlib.util, json, os, subprocess, sys, time
 
 detect_path, work = sys.argv[1], sys.argv[2]
-spec = importlib.util.spec_from_file_location("clawmon_detect", detect_path)
+spec = importlib.util.spec_from_file_location("cc_monitor_detect", detect_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 

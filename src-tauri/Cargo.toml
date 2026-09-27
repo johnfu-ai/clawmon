@@ -1,18 +1,18 @@
 [package]
-name = "clawmon"
+name = "cc-monitor"
 version.workspace = true
 edition.workspace = true
-description = "Claude Code WSL 状态监控小程序"
+description = "Claude Code WSL session monitor"
 
 [lib]
-name = "clawmon_lib"
+name = "cc_monitor_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-clawmon-core = { path = "../core" }
+cc-monitor-core = { path = "../core" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }

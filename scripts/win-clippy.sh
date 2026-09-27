@@ -28,4 +28,4 @@ fi
 export RC="${RC:-$RC_DEFAULT}"
 
 export CC_x86_64_pc_windows_msvc="${CC_x86_64_pc_windows_msvc:-gcc}"
-exec cargo clippy --target x86_64-pc-windows-msvc -p clawmon --all-targets -- -D warnings
+exec cargo clippy --target x86_64-pc-windows-msvc -p cc-monitor --all-targets -- -D warnings

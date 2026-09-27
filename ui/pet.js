@@ -1,4 +1,4 @@
-/* clawmon desktop pet — click to bring the main window back, drag to move.
+/* cc-monitor desktop pet — click to bring the main window back, drag to move.
    Loads i18n.js (see pet.html) so the pet renders through the same copy
    table as the main window instead of a private one. */
 const { invoke } = window.__TAURI__.core;
@@ -35,7 +35,7 @@ function applyStatus(s) {
     count = s.blue;
   }
   root.dataset.state = state;
-  root.title = `clawmon — 🔴${s.red} 🟡${s.yellow} 🔵${s.blue} 🟢${s.green}\n${
+  root.title = `cc-monitor — 🔴${s.red} 🟡${s.yellow} 🔵${s.blue} 🟢${s.green}\n${
     t(STATE_KEY[state])}（${t("pet.click")}）`;
 
   badge.classList.toggle("hidden", count === 0);

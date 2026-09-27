@@ -427,6 +427,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-monitor"
+version = "0.2.0"
+dependencies = [
+ "cc-monitor-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-notification",
+ "windows",
+]
+
+[[package]]
+name = "cc-monitor-core"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -469,28 +491,6 @@ dependencies = [
  "num-traits",
  "serde",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "clawmon"
-version = "0.2.0"
-dependencies = [
- "clawmon-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-notification",
- "windows",
-]
-
-[[package]]
-name = "clawmon-core"
-version = "0.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

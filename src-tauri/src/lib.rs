@@ -1,4 +1,4 @@
-use clawmon_core::{
+use cc_monitor_core::{
     engine::{state_counts, SessionView},
     settings::Settings,
     tasks::{Task, TaskStore, TaskView},
@@ -204,7 +204,7 @@ fn update_status_followers(app: &tauri::AppHandle, sessions: &[SessionView], war
     c.warning = warning;
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(&format!(
-            "clawmon — 🔴{} 🟡{} 🔵{} 🟢{}",
+            "cc-monitor — 🔴{} 🟡{} 🔵{} 🟢{}",
             c.red, c.yellow, c.blue, c.green
         )));
     }
@@ -319,7 +319,7 @@ fn spawn_usage_loop(app: tauri::AppHandle) {
         loop {
             let settings = lock(&app.state::<AppState>().settings).clone();
             if settings.show_glm_usage {
-                match clawmon_core::usage::query_usage(&settings) {
+                match cc_monitor_core::usage::query_usage(&settings) {
                     Ok(info) => {
                         let state = app.state::<AppState>();
                         *lock(&state.last_usage) = Some(info.clone());
@@ -614,7 +614,7 @@ async fn stop_task(
 }
 
 /// Open a visible terminal attached to the task's tmux session (FR10.4).
-/// Spawn-only: the terminal outlives clawmon and monitoring never depends
+/// Spawn-only: the terminal outlives cc-monitor and monitoring never depends
 /// on it.
 #[tauri::command]
 async fn open_task_terminal(state: State<'_, AppState>, id: u64) -> Result<(), String> {
@@ -771,7 +771,7 @@ fn ensure_single_instance() {
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    let name: Vec<u16> = "com.statebar.clawmon.single-instance\0"
+    let name: Vec<u16> = "com.statebar.cc-monitor.single-instance\0"
         .encode_utf16()
         .collect();
     unsafe {
@@ -855,7 +855,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&show, &quit])?;
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("clawmon")
+                .tooltip("cc-monitor")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
