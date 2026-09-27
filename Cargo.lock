@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "cc-monitor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cc-monitor-core",
  "serde",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "cc-monitor-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
