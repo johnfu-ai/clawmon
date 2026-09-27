@@ -223,15 +223,15 @@ claude              # 在 tmux 里启动 claude
 
 | 灯 | 语义 | 判定 |
 |----|------|------|
-| 🟢 绿 | **不需要你** | 活跃窗口内；thinking-only 且无收尾；普通工具在跑；等 Subagent（挂起工具为 Task/Agent/TaskOutput，或子代理转录仍新鲜）；等 API 且未超时；claude 自己在重试（`retrying`）；以及**停顿但仍能自动继续**（超时 / 用量 429 / 可重试 API 错误，且在 tmux 内、自动继续开着、次数未用完）——倒计时打在绿灯上 |
-| 🔵 蓝 | **回合结束，或停在提示符** | 有 `turn_duration` / `stop_hook_summary` 收尾；用户中断；本地斜杠命令已执行完；无转录且进程空闲（新会话等第一句）；超时的 user/tool_result 但进程空闲（并没有在等 API） |
+| 🟢 绿 | **不需要你** | 活跃窗口内；thinking-only 且无收尾；普通工具在跑；等 Subagent（挂起工具为 Task/Agent/TaskOutput，或子代理 / dynamic workflow 转录仍新鲜：`subagents/agent-*.jsonl`，以及 `subagents/workflows/<run>/` 下的 agent 记录和 journal）；等 API 且未超时；claude 自己在重试（`retrying`）；以及**停顿但仍能自动继续**（超时 / 用量 429 / 可重试 API 错误，且在 tmux 内、自动继续开着、次数未用完）——倒计时打在绿灯上 |
+| 🔵 蓝 | **回合结束，或停在提示符** | 有 `turn_duration` / `stop_hook_summary` 收尾；用户中断；本地斜杠命令已执行完，且没有仍新鲜的子代理或 dynamic workflow 转录；无转录且进程空闲（新会话等第一句）；超时的 user/tool_result 但进程空闲（并没有在等 API） |
 | 🟡 黄 | **要你输入**，或**看不出在等什么** | AskUserQuestion；ExitPlanMode（等你批准计划）；目标已暂停（`goal_paused`）；找不到转录且 CPU 未知；转录不新鲜 |
 | 🔴 红 | **只有人能处理** | 上面的停顿但自动继续接不了（不在 tmux、自动继续关闭、次数用尽）；不可重试的 API 错误（400/401/403/404） |
 
 颜色由 `light()` 决定，不单由 reason 决定：同一个 `response_timed_out` 在能自动继续时是绿灯，不能时是红灯。
 
 **判定顺序本身是需求**（无转录 / 不新鲜 → 429 → AskUserQuestion → ExitPlanMode →
-目标暂停 → 新鲜子代理 → claude 自重试 → thinking → API 错误 → 中断 / 本地命令 →
+目标暂停 → 新鲜子代理或 dynamic workflow → claude 自重试 → thinking → API 错误 → 中断 / 本地命令 →
 收尾标记 → 活跃窗口 → 工具 → 超时，超时处再用 CPU 把空闲进程改判为待命）。
 核心安全原则：
 
@@ -688,6 +688,7 @@ api_error_retryable, system_notice, subagent_idle_sec?, cpu_ticks_per_sec?`。
 | v0.2.0 | 2026-09-13 | 通知（5 类）、回合结束/退出事件、常驻检测进程、i18n（zh/en）、提示音、宠物常驻与点击穿透、单实例；自动更新加入后又按用户决策移除 |
 | main（未发版） | 2026-09-13 ~ 09-19 | 子代理进程过滤、/clear 跟随、幽灵会话过滤（deleted pts + 孤儿 PseudoConsole）、Subagent 绿灯、灯语义重映射（忙碌等待全绿）、蓝灯（回合完成）、429 红灯 + 重置时间感知、每会话 token 用量、GLM 套餐额度条、线契约测试、设置归属与锁纪律重构 |
 | v2.0（设计中） | 2026-09-25 | 任务清单 + 一键启动（FR10）、多页面主窗口与统一主导航（FR5.2）、用量页；配套产品章程与设计系统（docs/） |
+| main（未发版） | 2026-09-27 | dynamic workflow 与后台 subagent 同一绿灯：`subagents/workflows/<run>/` 仍在写时，后到的本地斜杠命令不会判成蓝灯待命 |
 
 ## 附录 B：术语表
 

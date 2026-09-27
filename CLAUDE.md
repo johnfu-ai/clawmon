@@ -45,13 +45,16 @@ was deliberately removed (2026-09-13, user decision) — do not reintroduce it.
 - The poll loop lives in the Rust backend, never in WebView JS: WebView2
   throttles hidden-window timers, and monitoring must survive tray/pet mode.
 - Light semantics (2026-09-27, user decision): green means "no user
-  action needed" — active, waiting on the API, a running tool, a subagent,
+  action needed" — active, waiting on the API, a running tool, a subagent
+  or a dynamic workflow (fresh writes under `subagents/agent-*.jsonl` or
+  `subagents/workflows/<run>/`, which outrank a later local slash command),
   a thinking-only record, claude retrying an API error on its own, **or a
   stall whose auto-continue countdown is still running** (tmux, auto-continue
   on, attempts left). Blue means the turn completed (`turn_duration` /
-  `stop_hook_summary`), the user interrupted, a local command already ran,
-  or the process is idle at the prompt (a fresh session with no transcript,
-  or a prompt past the timeout whose CPU is idle). Yellow means the user
+  `stop_hook_summary`), the user interrupted, a local command already ran
+  and no agent or workflow transcript is still fresh, or the process is
+  idle at the prompt (a fresh session with no transcript, or a prompt past
+  the timeout whose CPU is idle). Yellow means the user
   must provide input mid-flight (AskUserQuestion, ExitPlanMode, a paused
   goal) or we cannot tell (no transcript and CPU unknown, or a transcript
   we cannot trust). Red means only a person can fix it: a stall that

@@ -38,7 +38,7 @@ Claude Code 终端会话，用 **红 / 黄 / 蓝 / 绿灯** 展示状态，并�
   | 灯 | 条件 | 含义 |
   |----|------|------|
   | 🟢 | 空闲 < 活跃阈值（默认 2 分钟），或 thinking-only | 正在干活 |
-  | 🟢 | 挂起的 tool 是 `Task` / `Agent` / `TaskOutput`，或子代理转录仍新鲜 | 等待 Subagent |
+  | 🟢 | 挂起的 tool 是 `Task` / `Agent` / `TaskOutput`，或子代理 / dynamic workflow 的转录仍新鲜 | 等待 Subagent |
   | 🟢 | 挂起的 tool 是其它工具（除下面两种） | 工具执行中 |
   | 🟢 | 最后一条是 user，未超超时阈值 | 等待 API 响应（慢不等于卡） |
   | 🟢 | claude 自己写了 “retrying” | API 重试中 |
@@ -56,6 +56,12 @@ Claude Code 终端会话，用 **红 / 黄 / 蓝 / 绿灯** 展示状态，并�
   **蓝灯 = 回合完成或停在提示符**；**黄灯 = 要你输入，或看不出在等什么**；
   **红灯 = 只有人能处理**。拿不准不发按键。进程空闲（常驻检测测得低于
   5 ticks/s）时绝不发 Enter。
+
+  Dynamic workflow（Claude Code 的 “Waiting for N dynamic workflow(s) to
+  finish”）和后台 subagent 是同一条绿灯。workflow 的 agent 记录和阶段
+  journal 写在 `subagents/workflows/<run>/`，这些文件仍新鲜时，后到的本地
+  斜杠命令（例如 `/workflows`）不会把会话改判成蓝灯「待命」。文件安静超过
+  子代理空闲窗口（默认 10 分钟）之后，才按收尾标记或本地命令回到蓝灯。
 - **自动继续**：会话进入停顿（超时、用量上限、可重试的 API 错误）后开始计时，
   这段时间灯是绿色。用量上限 429 会从错误文案里解析重置时间（例如「限额将在
   2026-09-19 16:21:07 重置」），到点后再通过 `tmux send-keys -t <pane> Enter`
